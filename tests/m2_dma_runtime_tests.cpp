@@ -13,6 +13,7 @@
 #include "rrv_m2_dma_provenance.h"
 
 #include <array>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -360,6 +361,8 @@ void run(const std::filesystem::path &output)
     runtime.memory().flushHeldVif1AtGuestFrameEnd();
     submitDevVif1Fifo(runtime, ctx, kDevVif1Fifo);
     submitStoreChain(runtime, ctx, kZeroChain);
+    check((runtime.memory().readIORegister(kVif1) & 0xFFFF0000u) == 0x70000000u,
+          "VIF1 CHCR.TAG mirrors the completed END tag");
     check(sink.packets.size() == 7u, "zero-QWC chain completes without a PATH2 packet");
 
     // Reuses GifArbiter pooled packet storage after PATH2 delivery. A PATH3
@@ -427,6 +430,44 @@ void run(const std::filesystem::path &output)
     }
 }
 
+void runIpu()
+{
+    PS2Runtime runtime;
+    check(runtime.memory().initialize(), "IPU memory initialization");
+    auto& mem=runtime.memory(); auto& ctx=runtime.cpu();
+    std::vector<uint32_t> causes;
+    mem.setDmacCompletionCallback([&](uint32_t c) { causes.push_back(c); });
+    auto* ram=mem.getRDRAM();
+    // Test the Sony Stop/Restart helpers with a partially transferred input
+    // DMA. Restart must replay the eight buffered QWs, not drop them.
+    std::memset(ram+0x100,16,256); std::memset(ram+0x200,128,128);
+    mem.write32(0x10002010,0x40000000);
+    mem.write32(0x1000b410,0x100); mem.write32(0x1000b420,24); mem.write32(0x1000b400,0x101);
+    check(mem.read32(0x1000b420)==16, "IPU input DMA preserves unconsumed data");
+    setGpr32(ctx,4,0x2000);
+    ps2_stubs::sceIpuStopDMA(ram,&ctx,&runtime);
+    check(!(mem.read32(0x1000b400)&0x100), "IPU StopDMA stops input channel");
+    mem.write32(0x2010,0x1000); mem.write32(0x2014,64); mem.write32(0x2018,0);
+    ps2_stubs::sceIpuRestartDMA(ram,&ctx,&runtime);
+    mem.write32(0x10002000,0x70000001);
+    setGpr32(ctx,4,0);
+    ps2_stubs::sceIpuSync(ram,&ctx,&runtime);
+    check(!(mem.read32(0x10002010)&0x80000000), "IPU Sync waits for conversion");
+    check(mem.read32(0x1000b010)==0x1400 && mem.read32(0x1000b020)==0, "IPU output DMA cursor");
+    check(mem.read32(0x1000b420)==0, "IPU input DMA drained");
+    for(unsigned i=0;i<256;++i) check(mem.read32(0x1000+i*4)==0x80000000, "IPU decoded RGBA pixel");
+    check(std::count(causes.begin(),causes.end(),3)==1 && std::count(causes.begin(),causes.end(),4)==1,
+          "IPU DMA handlers receive each completion once");
+    mem.write32(0x10002000,0); // clear input before a CPU FIFO write
+    alignas(16) uint32_t words[4]={0x78563412,0x0000009a,0,0};
+    mem.write128(0x10007010,_mm_loadu_si128(reinterpret_cast<const __m128i*>(words)));
+    mem.write32(0x10002000,0x40000000);
+    check(mem.read64(0x10002000)==0x12345678, "IPU 64-bit CMD reads decoded data and busy lane");
+    mem.write32(0x10002000,0x40000008);
+    check(mem.read32(0x10002000)==0x3456789a, "IPU FIFO bit advance");
+    std::cout << "IPU public memory and Sony DMA helper integration checks complete\n";
+}
+
 void usage(const char *name)
 {
     std::cerr << "usage: " << name << " [--output <deferred-json-path>]\n";
@@ -435,6 +476,9 @@ void usage(const char *name)
 
 int main(int argc, char **argv)
 {
+    if(argc==2 && std::string_view(argv[1])=="--ipu") {
+        runIpu(); return failures==0?0:1;
+    }
     std::filesystem::path output;
     if (argc == 3 && std::string_view(argv[1]) == "--output")
         output = argv[2];

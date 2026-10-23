@@ -69,6 +69,29 @@ struct Harness {
     void ack(uint64_t mask = 1) { check(control.write(0x12001000, 64, mask), "CSR MMIO handled"); }
 };
 
+// Nocturne submits an IMAGE tag and its pixels in separate DIRECTHL chunks,
+// then a separate A+D FINISH packet. Pixel words must not become GS events.
+static void nocturneSplitImageFinish() {
+    Harness h;
+    Bytes imageTag;
+    tag(imageTag, 2, 2, 0, 0);
+    h.submit(2, imageTag);
+    Bytes pixels;
+    qw(pixels, 0, 0x61); // Deliberately resembles A+D FINISH, but is IMAGE data.
+    qw(pixels, 0, 0x60);
+    h.submit(2, pixels);
+    check(h.control.counters().finishes == 0, "IMAGE pixels must not fire FINISH");
+    Bytes finish;
+    tag(finish, 1, 0, 1, 0xe);
+    qw(finish, 0, 0x61);
+    h.submit(2, finish);
+    check(h.control.counters().finishes == 1, "Nocturne FINISH decoded once");
+    check((h.bank[15] & 2) != 0, "Nocturne FINISH reaches guest CSR");
+    check(h.rendererRemaining == 0, "Nocturne split IMAGE preserves renderer framing");
+    h.ack(2);
+    check((h.bank[15] & 2) == 0, "guest acknowledgement clears FINISH");
+}
+
 static void repeatedSignalOwnedResume() {
     Harness h;
     Bytes packet;
@@ -243,6 +266,7 @@ static void admissionFailureAndLifecycle() {
 }
 
 int main() {
+    nocturneSplitImageFinish();
     repeatedSignalOwnedResume();
     decodedFormatsAndFragmentation();
     activePathAndGlobalStall();

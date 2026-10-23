@@ -791,7 +791,9 @@ static const std::unordered_map<std::string, std::string> gameDatabase =
     { "SLPS-25303", "Zero - Akai Chou (Japan)" },
     { "SLPM-65019", "Zone of the Enders - Z.O.E (Japan)" },
     { "SLES-50933", "eJay ClubWorld - The Music Making Experience (Europe)" },
-    { "SLUS-20525", "eJay Clubworld - The Music Making Experience (USA)" }
+    { "SLUS-20525", "eJay Clubworld - The Music Making Experience (USA)" },
+    // Magatama: the product looks the title up by the boot ELF's file name.
+    { "SLUS_209.11", "Shin Megami Tensei: Nocturne" },
 };
 
 const char* getGameName(const std::string& gameId)

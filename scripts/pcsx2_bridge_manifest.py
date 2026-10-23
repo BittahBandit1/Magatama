@@ -19,6 +19,11 @@ from typing import Optional, Union
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BRIDGE_SOURCE = ROOT / "tools" / "pcsx2-gs-bridge"
+# Magatama: the bridge is reused from the Fukami checkout that built it, whose CMake cache names that
+# checkout's tools/pcsx2-gs-bridge. MAGATAMA_BRIDGE_ROOT points at that checkout (its build worktree);
+# the bridge source inventory below is still checked file by file against this repository.
+if __import__("os").environ.get("MAGATAMA_BRIDGE_ROOT"):
+    BRIDGE_SOURCE = pathlib.Path(__import__("os").environ["MAGATAMA_BRIDGE_ROOT"]) / "tools" / "pcsx2-gs-bridge"
 # Linux (Gate 5): the Vulkan bridge applies one extra patch on top of the locked
 # target patch and has no Metal resources. macOS manifests are unchanged.
 LINUX_BRIDGE = sys.platform.startswith("linux")
@@ -215,7 +220,9 @@ def validate_build_cache(build_dir: pathlib.Path, source: pathlib.Path,
         "cmake_home": portable_path(source),
         "generator": generator,
         "build_type": values["CMAKE_BUILD_TYPE"],
-        "bridge_source": portable_path(BRIDGE_SOURCE),
+        # Magatama: a bridge reused from MAGATAMA_BRIDGE_ROOT recorded this path relative to that root.
+        "bridge_source": ("tools/pcsx2-gs-bridge" if os.environ.get("MAGATAMA_BRIDGE_ROOT")
+                          else portable_path(BRIDGE_SOURCE)),
     }
     if resource_dir is not None:
         build["metal_resource_source"] = portable_path(resource_dir)

@@ -4,6 +4,11 @@
 #include "rrv_snapshot_hooks.h" // developer snapshots (docs/SNAPSHOTS.md)
 #include "rrv_guest_terminal_outcome.h"
 
+// Magatama: CP0 Status a guest thread starts with. The PS2 kernel starts user threads with interrupts enabled
+// (IE, EIE and the INTC/DMAC lines); Fukami's runtime started every context at 0, which RR5 never noticed because it
+// waits on VBlank through sceGsSyncV, not interrupts. Set by src/product/patches.cpp; 0 keeps the old behaviour.
+uint32_t g_magatamaThreadStatus = 0u;
+
 namespace ps2_syscalls
 {
     static void applySuspendStatusLocked(ThreadInfo &info)
@@ -380,6 +385,7 @@ namespace ps2_syscalls
             PS2Runtime::GuestExecutionScope gate3Lifetime(runtime);
             R5900Context threadCtxCopy{};
             R5900Context *threadCtx = &threadCtxCopy;
+            threadCtx->cop0_status = g_magatamaThreadStatus; // Magatama: kernel default for user threads
 
             {
                 std::lock_guard<std::mutex> lock(info->m);
@@ -765,10 +771,15 @@ namespace ps2_syscalls
         setReturnS32(ctx, ticket->result);
     }
 
-    void WakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    static void wakeupThreadImpl(R5900Context *ctx, PS2Runtime *runtime, bool fromInterrupt)
     {
         const int tid = static_cast<int>(getRegU32(ctx, 4));
-        if (!tid || tid == g_currentThreadId) { setReturnS32(ctx, KE_ILLEGAL_THID); return; }
+        // A completion interrupt can wake the interrupted thread before it
+        // reaches SleepThread. Preserve that wakeup in wakeupCount; rejecting
+        // it here loses synchronous DMA completions and leaves Nocturne asleep.
+        if (!tid || (!fromInterrupt && tid == g_currentThreadId)) {
+            setReturnS32(ctx, KE_ILLEGAL_THID); return;
+        }
         auto info = lookupThreadInfo(tid);
         if (!info) { setReturnS32(ctx, KE_UNKNOWN_THID); return; }
         bool sleep;
@@ -782,9 +793,14 @@ namespace ps2_syscalls
         setReturnS32(ctx, KE_OK);
     }
 
+    void WakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        wakeupThreadImpl(ctx, runtime, false);
+    }
+
     void iWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        WakeupThread(rdram, ctx, runtime);
+        wakeupThreadImpl(ctx, runtime, true);
     }
 
     void CancelWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

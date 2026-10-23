@@ -45,6 +45,28 @@ inline void QuietBumpProducer() {
 #include <mutex>
 #include <string>
 #include <vector>
+#include "runtime/rrv_ipu.h"
+namespace {
+bool magatamaIpuEnabled() {
+    static const bool enabled=[] { const char* p=std::getenv("MAGATAMA_IPU"); return p && p[0]=='1'; }();
+    return enabled;
+}
+template<class Queue>
+void serviceMagatamaIpu(std::unordered_map<uint32_t,uint32_t>& regs, uint8_t* ram, Queue& causes) {
+    rrv::ipu::service(regs,ram);
+    for(unsigned cause:rrv::ipu::completed) causes.push_back(cause);
+    rrv::ipu::completed.clear();
+    static const bool trace=[] { const char* p=std::getenv("MAGATAMA_TRACE_IPU"); return p && p[0]=='1'; }();
+    static uint64_t last=0;
+    auto bytes=rrv::ipu::outputBytes;
+    if(trace && bytes!=last && (bytes-last>=262144 || !rrv::ipu::ipuRegs.ctrl.BUSY)) {
+        std::fprintf(stderr,"[ipu-decode] input=%llu output=%llu ctrl=%08x top=%08x from_qwc=%u to_qwc=%u\n",
+            (unsigned long long)rrv::ipu::inputBytes,(unsigned long long)bytes,
+            rrv::ipu::ipuRegs.ctrl._u32,rrv::ipu::ipuRegs.top,regs[0x1000b020],regs[0x1000b420]);
+        last=bytes;
+    }
+}
+}
 
 // RRV_FLAG_A_M1_DIAG — metadata-only rate probe for the FLAG_A pin audit.
 // The present loop calls the two public helpers below once per host present and
@@ -718,6 +740,7 @@ bool PS2Memory::initialize(size_t ramSize)
     };
 
     cleanup();
+    if (magatamaIpuEnabled()) rrv::ipu::reset();
     m_seenGifCopy = false;
     m_dmaStartCount.store(0, std::memory_order_relaxed);
     m_gifCopyCount.store(0, std::memory_order_relaxed);
@@ -1059,6 +1082,12 @@ uint64_t PS2Memory::read64(uint32_t address)
         return loadScalar<uint64_t>(m_rdram, physAddr, PS2_RAM_SIZE, "read64 rdram", address);
     }
 
+    if (magatamaIpuEnabled() && address>=0x10002000u && address<=0x10002030u) {
+        const auto lo=readIORegister(address);
+        const auto hi=readIORegister(address+4);
+        return uint64_t(lo)|(uint64_t(hi)<<32);
+    }
+
     // 64-bit IO read: compose from the two adjacent 32-bit IO register slots
     // to avoid any side-effects from read32 handlers.
     if (address >= PS2_IO_BASE && address < (PS2_IO_BASE + PS2_IO_SIZE))
@@ -1392,6 +1421,15 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         throw std::runtime_error("Unaligned 128-bit write at address: 0x" + std::to_string(address));
     }
 
+    if (magatamaIpuEnabled() && address==0x10007010u) {
+        alignas(16) uint32_t words[4];
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(words),value);
+        rrv::ipu::ipu_fifo.in.write(words,1);
+        serviceMagatamaIpu(m_ioRegisters,m_rdram,m_pendingDmacCompletionCauses);
+        completePendingTransfersV1(false,false,false);
+        return;
+    }
+
     const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
@@ -1477,6 +1515,20 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
     if (address >= 0x10002000 && address <= 0x10002030)
     {
+        static const bool traceIpu = [] {
+            const char* v = std::getenv("MAGATAMA_TRACE_IPU");
+            return v && v[0] == '1';
+        }();
+        static uint64_t writes = 0;
+        if (traceIpu && (++writes <= 64 || writes % 10000 == 0))
+            std::fprintf(stderr, "[ipu-write] n=%llu reg=%08x value=%08x opcode=%x\n",
+                (unsigned long long)writes, address, value, value >> 28);
+        if (magatamaIpuEnabled()) {
+            rrv::ipu::write(address,value);
+            serviceMagatamaIpu(m_ioRegisters,m_rdram,m_pendingDmacCompletionCauses);
+            completePendingTransfersV1(false,false,false);
+            return true;
+        }
         if (address == 0x10002010)
         {
             m_ioRegisters[address] = value & ~(1u << 31);
@@ -1598,6 +1650,24 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+            if (channelBase == 0x1000B000u || channelBase == 0x1000B400u) {
+                static const bool traceIpuDma = [] {
+                    const char* v = std::getenv("MAGATAMA_TRACE_IPU");
+                    return v && v[0] == '1';
+                }();
+                static uint64_t bursts = 0;
+                if (traceIpuDma && (++bursts <= 64 || bursts % 1000 == 0))
+                    std::fprintf(stderr, "[ipu-dma] n=%llu direction=%s chcr=%08x madr=%08x qwc=%u tadr=%08x\n",
+                        (unsigned long long)bursts, channelBase == 0x1000B000u ? "from-ipu" : "to-ipu",
+                        value, madr, qwc, m_ioRegisters[channelBase + 0x30]);
+            }
+
+            if (magatamaIpuEnabled() && (channelBase==0x1000B000u || channelBase==0x1000B400u)) {
+                if ((value & 0xcu)!=0) throw std::runtime_error("IPU chain DMA is not implemented");
+                serviceMagatamaIpu(m_ioRegisters,m_rdram,m_pendingDmacCompletionCauses);
+                completePendingTransfersV1(false,false,false);
+                return true;
+            }
 
             // Scratchpad (SPR) DMA channels: ch8 fromSPR (0x1000D000) and ch9 toSPR
             // (0x1000D400). These copy between main RAM (MADR) and the 16KB scratchpad
@@ -1964,6 +2034,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                         const uint8_t *tp = tagBase + physTag;
                         uint64_t tag = loadScalar<uint64_t>(tp, 0, 16, "dma chain tag", tagAddr);
+                        // DMACh::chcrTransfer in the pinned PCSX2 Dmac.h:
+                        // TAG mirrors the upper half of the last fetched tag.
+                        // Nocturne tests END through CHCR+2 after completion.
+                        chcr = (chcr & 0xFFFFu) | (static_cast<uint32_t>(tag) & 0xFFFF0000u);
                         uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
@@ -2299,6 +2373,20 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                          tagQwc, id == 2u ? 1u : 0u);
                             logPostCarReturn = false;
                         }
+                        static const bool magatamaTraceDma = [] {
+                            const char* v = std::getenv("MAGATAMA_TRACE_GRAPHICS");
+                            return v && v[0] == '1';
+                        }();
+                        static uint64_t magatamaTagSamples = 0;
+                        const bool sampleMagatamaTag = magatamaTraceDma && channelBase == 0x10009000u &&
+                            (irq || id == 7u) && (++magatamaTagSamples <= 24 || magatamaTagSamples % 120 == 0);
+                        if (sampleMagatamaTag) {
+                            uint64_t upper = 0;
+                            std::memcpy(&upper, tp + 8, 8);
+                            std::fprintf(stderr, "[graphics-dma-tag] tag=%08x lo=%016llx upper=%016llx next=%08x range=%zu:%zu tie=%u\n",
+                                currentTagAddr, (unsigned long long)tag, (unsigned long long)upper,
+                                tagAddr, appendBegin, chainBuf.size(), unsigned(tieEnabled));
+                        }
                         if (irq && tieEnabled)
                         {
                             terminateCarDiag(false, "irq-tie", currentTagAddr);
@@ -2466,6 +2554,27 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                                      provBlocks[i].id,
                                                      dmaTagName(provBlocks[i].id));
                                 }
+                            }
+                        }
+                    }
+
+                    if (channelBase == 0x10009000u) {
+                        static const bool trace = [] {
+                            const char* v = std::getenv("MAGATAMA_TRACE_GRAPHICS");
+                            return v && v[0] == '1';
+                        }();
+                        static unsigned chains = 0;
+                        if (trace && ++chains <= 16) {
+                            std::fprintf(stderr, "[graphics-vif-chain] bytes=%zu next=%08x\n",
+                                chainBuf.size(), tagAddr);
+                            // Preserve the tail, including partial qwords, so a
+                            // VIF command split across DMAtags remains visible.
+                            size_t off = chainBuf.size() > 256 ? chainBuf.size() - 256 : 0;
+                            off &= ~size_t(3);
+                            for (; off + 4 <= chainBuf.size(); off += 4) {
+                                uint32_t word = 0;
+                                std::memcpy(&word, chainBuf.data() + off, 4);
+                                std::fprintf(stderr, "[graphics-vif-tail] +%04zx %08x\n", off, word);
                             }
                         }
                     }
@@ -3772,6 +3881,12 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         return 0u;
     }
 
+    if (magatamaIpuEnabled() && ((address>=0x10002000u && address<=0x10002034u) ||
+        (address>=0x1000B000u && address<=0x1000B430u))) {
+        serviceMagatamaIpu(m_ioRegisters,m_rdram,m_pendingDmacCompletionCauses);
+        completePendingTransfersV1(false,false,false);
+        return address<0x10003000u ? rrv::ipu::read(address) : m_ioRegisters[address];
+    }
     if (address >= 0x10002000 && address <= 0x10002030)
     {
         uint32_t val = 0;

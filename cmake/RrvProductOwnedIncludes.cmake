@@ -9,7 +9,11 @@
 # src/guest-time also holds older variants of three headers that the runtime keeps its own, newer
 # versions of in third_party/ps2recomp (rrv_guest_scheduler.h, rrv_intc.h, rrv_temporal_owner.h):
 # it is always searched AFTER the runtime's include directory.
-set(RRV_GENERATED_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/generated/rr5" CACHE PATH
+set(_rrv_generated_include_default "${CMAKE_SOURCE_DIR}/generated/rr5")
+if(MAGATAMA_GAME)
+    set(_rrv_generated_include_default "${CMAKE_SOURCE_DIR}/generated/nocturne")
+endif()
+set(RRV_GENERATED_INCLUDE_DIR "${_rrv_generated_include_default}" CACHE PATH
     "Directory holding the game-derived vu/ and native/ include sources (private repository only)")
 foreach(_dir IN ITEMS "${RRV_GENERATED_INCLUDE_DIR}/vu" "${RRV_GENERATED_INCLUDE_DIR}/native"
         "${CMAKE_SOURCE_DIR}/src/guest-time" "${CMAKE_SOURCE_DIR}/src/vu-aot")

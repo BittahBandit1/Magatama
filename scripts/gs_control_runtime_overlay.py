@@ -1,5 +1,5 @@
 """Candidate producer ownership and existing INTC delivery integration."""
-from m2_causal_overlay import replace_once
+from gs_control_anchors import replace_once
 
 def add(t,a,b,label): return replace_once(t,a,a+b,label)
 
@@ -95,8 +95,12 @@ def interrupt_cpp(t):
 ''' + marker, 'GS existing IRQ route')
     start=t.index('    void EnableIntc('); end=t.index('    bool dispatchGsControlInterrupt', start)
     part=t[start:end]
-    part=replace_once(part,'        setReturnS32(ctx, KE_OK);\n',
-                     '        if (runtime) runtime->memory().retryGsControlIrq();\n        setReturnS32(ctx, KE_OK);\n','GS unmask retry')
+    if '        setReturnS32(ctx, KE_OK);\n' in part:
+        part=replace_once(part,'        setReturnS32(ctx, KE_OK);\n',
+                         '        if (runtime) runtime->memory().retryGsControlIrq();\n        setReturnS32(ctx, KE_OK);\n','GS unmask retry')
+    else:
+        part=replace_once(part,'setReturnS32(ctx,KE_OK);',
+            'runtime->memory().retryGsControlIrq(); setReturnS32(ctx,KE_OK);','GS temporal unmask retry')
     return t[:start]+part+t[end:]
 
 def runtime_cpp(t):
@@ -182,6 +186,8 @@ def runtime_cpp(t):
 ''','GS restore quiescence')
     # Final cheap aggregates; no packet clocks/logs.
     anchor='        ps2_syscalls::detachAllGuestHostThreads();\n        m_gsBackend.shutdown();\n'
+    if anchor not in t:
+        anchor='        ps2_syscalls::detachAllGuestHostThreads();\n        gate4ShutdownOwnerStreamV1();\n        m_gsBackend.shutdown();\n'
     t=add(t,anchor,'''    if (m_memory.gsControl().enabled()) {
         const auto &c = m_memory.gsControl().counters();
         std::fprintf(stderr, "[GS control totals] signal=%llu label=%llu finish=%llu stalls=%llu signal_ack=%llu finish_ack=%llu irq_requests=%llu irq_dispatch=%llu csr_writes=%llu imr_writes=%llu reset=%llu finish_delivered=%llu deferred_vif=%zu blocked_gif=%zu\\n",

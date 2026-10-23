@@ -882,6 +882,18 @@ bool PS2Runtime::gate3MmioWriteV1(uint32_t address,unsigned width,uint64_t value
         gate4GuestGsWriteV1(physical);
         logWrite();
         const uint64_t bits=value<<((physical-0x12001000u)*8);
+        static const bool traceGsWrites = [] {
+            const char* v=std::getenv("MAGATAMA_TRACE_GRAPHICS");
+            return v && v[0]=='1';
+        }();
+        static uint64_t gsWriteCount=0;
+        if(traceGsWrites && ++gsWriteCount<=512) {
+            const auto found=gate3WaitContexts.find(this);
+            std::fprintf(stderr,"[graphics-csr-write] bits=%016llx before=%016llx ctx=%d pc=%08x start=%llu\n",
+                (unsigned long long)bits,(unsigned long long)m_memory.gs().csr,
+                rrv::guest_time::context_id,found==gate3WaitContexts.end()?0u:found->second->pc,
+                (unsigned long long)gate3TemporalV1().starts());
+        }
         if(bits&(1u<<9)){
             gate3TemporalV1().ActionAt(rrv::guest_time::Action::CsrReset);
             auto& gs=m_memory.gs();gs.smode1=gs.smode2=gs.syncv=0;gs.imr=0x7f00;

@@ -46,6 +46,11 @@ function(rrv_gs_control_generate_overlay)
     set(_command "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/gs_control_overlay.py"
         --runtime-source "${ARG_RUNTIME_SOURCE_DIR}" --include-input "${ARG_INCLUDE_INPUT}"
         --output-dir "${ARG_OUTPUT_DIR}")
+    if(MAGATAMA_GAME AND RRV_PRODUCT_OWNED_SOURCE)
+        set(_command "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/magatama_gs_control_overlay.py"
+            --runtime-source "${ARG_RUNTIME_SOURCE_DIR}" --include-input "${ARG_INCLUDE_INPUT}"
+            --output-dir "${ARG_OUTPUT_DIR}")
+    endif()
     if(ARG_CALLBACK_STACK_MAIN_RESERVATION)
         list(APPEND _command --callback-stack-main-reservation)
     endif()
@@ -59,6 +64,8 @@ function(rrv_gs_control_generate_overlay)
     file(GLOB_RECURSE _headers CONFIGURE_DEPENDS "${ARG_INCLUDE_INPUT}/*")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_headers}
         "${CMAKE_SOURCE_DIR}/scripts/gs_control_overlay.py"
+        "${CMAKE_SOURCE_DIR}/scripts/magatama_gs_control_overlay.py"
+        "${CMAKE_SOURCE_DIR}/scripts/gs_control_anchors.py"
         "${CMAKE_SOURCE_DIR}/scripts/gs_control_memory_overlay.py"
         "${CMAKE_SOURCE_DIR}/scripts/gs_control_gif_overlay.py"
         "${CMAKE_SOURCE_DIR}/scripts/gs_control_runtime_overlay.py"

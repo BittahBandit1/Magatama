@@ -1630,7 +1630,7 @@ bool SdlPresentation::create(const char *title, std::string *error)
     if (startFullscreen)
         impl->applyDisplayRefresh(true, MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
 #endif
-    impl->window = SDL_CreateWindow(title ? title : "Fukami", SDL_WINDOWPOS_CENTERED,
+    impl->window = SDL_CreateWindow(title ? title : "Magatama", SDL_WINDOWPOS_CENTERED,
                                     SDL_WINDOWPOS_CENTERED, windowWidth, windowHeight,
                                     kApiWindowFlag | SDL_WINDOW_RESIZABLE |
                                         SDL_WINDOW_ALLOW_HIGHDPI |

@@ -5,6 +5,8 @@
 #include "Stubs/GS.h"
 #include "Stubs/CD.h"
 
+extern uint32_t g_magatamaThreadStatus; // Magatama: Kernel/Syscalls/Thread.cpp
+
 namespace ps2_syscalls
 {
     namespace interrupt_state
@@ -61,6 +63,9 @@ void gate3DeliverTemporal(uint8_t* rdram,R5900Context* ctx,PS2Runtime* runtime) 
         if(entry.cause!=previousCause){
             if(!intc.InterruptEligible(ctx->cop0_status) || !(intc.Read().pending&(1u<<entry.cause)))continue;
             previousCause=entry.cause;
+            // Magatama: the EE kernel acknowledges INTC_STAT for a cause before running its handlers. Without it the
+            // level-based delivery re-ran Nocturne's VBlank handler 7 million times inside one frame.
+            if(g_magatamaThreadStatus!=0u)intc.WriteStat(1u<<entry.cause);
         }
         runtime->gate3RunCallbackV1(ctx,entry.handler,entry.gp,entry.cause,entry.arg,0,true);
         if(runtime->gate3AtCutV1())return;

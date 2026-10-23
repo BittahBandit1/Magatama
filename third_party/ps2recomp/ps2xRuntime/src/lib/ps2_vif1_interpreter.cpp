@@ -11,6 +11,11 @@
 #include <vector>
 #include "ps2_log.h"
 
+// Enabled by Nocturne's override layer. GIF IMAGE continuation belongs to
+// the GIF decoder; it must not swallow new VIF codes after a completed DIRECT.
+// Keep the legacy RR5 raw-image shortcut available for its existing workload.
+bool g_magatamaStrictVifDirect = false;
+
 // RRV_DMA_ORDER_DIAG ring (defined in ps2_memory.cpp) — see the comment there.
 void rrvNoteDmaOrderEvent(const char *what, unsigned long long a, unsigned long long b);
 
@@ -716,7 +721,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     rrvNoteVif1DirectTruncation(declaredQw, qwCount);
 
                 const uint32_t imageQw = gifImageQwcFromTag(data + pos, qwCount * 16u);
-                if (imageQw != 0u)
+                if (imageQw != 0u && !g_magatamaStrictVifDirect)
                 {
                     const uint32_t inlineImageQw = (qwCount > 0u) ? (qwCount - 1u) : 0u;
                     if (imageQw > inlineImageQw)

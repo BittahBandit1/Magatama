@@ -255,7 +255,7 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
         return;
     }
 
-    if (ui.begin_menu("Fukami", appearing ? 1 : 0))
+    if (ui.begin_menu("Magatama", appearing ? 1 : 0))
     {
         if (ui.button("Resume"))
             close();

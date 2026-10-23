@@ -528,6 +528,26 @@ void PS2Runtime::dispatchGsPacket(GifPathId pathId, const uint8_t *data, uint32_
             // and interrupt delivery; the bridge supplies only GS-produced
             // state after decoding the already-arbitrated packet.
             gate4StoreReadbackV1(csr, siglblid);
+            // Nocturne bring-up: observe the actual post-arbitration GIF bytes
+            // and bridge status without changing packet decoding or GS state.
+            static const bool traceFinish = [] {
+                const char* value = std::getenv("MAGATAMA_TRACE_GRAPHICS");
+                return value && value[0] == '1';
+            }();
+            static uint64_t packetCount = 0;
+            if (traceFinish && ++packetCount <= 512) {
+                std::fprintf(stderr, "[graphics-gif] packet=%llu path=%u bytes=%u csr=%016llx siglblid=%016llx\n",
+                    (unsigned long long)packetCount, (unsigned)pathId, size,
+                    (unsigned long long)csr, (unsigned long long)siglblid);
+                const uint32_t limit = size <= 128u ? size : 32u;
+                for (uint32_t off = 0; data && off + 16u <= limit; off += 16u) {
+                    uint64_t lo = 0, hi = 0;
+                    std::memcpy(&lo, data + off, 8);
+                    std::memcpy(&hi, data + off + 8, 8);
+                    std::fprintf(stderr, "[graphics-gif] +%04x %016llx %016llx\n", off,
+                        (unsigned long long)lo, (unsigned long long)hi);
+                }
+            }
             return;
         }
         throw std::runtime_error("PCSX2 GS bridge packet dispatch failed: " + error);
@@ -612,6 +632,17 @@ void PS2Runtime::advanceActiveGsBackendField(uint64_t fieldIndex)
 // The owner-side tail of a field transition (inline: the same thread).
 void PS2Runtime::gate4FinishFieldV1(const std::array<uint64_t, 19u> &regs19, uint64_t fieldIndex)
 {
+    static const bool traceDisplay = [] {
+        const char* v = std::getenv("MAGATAMA_TRACE_GRAPHICS");
+        return v && v[0] == '1';
+    }();
+    if (traceDisplay && (fieldIndex < 12 || fieldIndex % 120 == 0)) {
+        std::fprintf(stderr, "[graphics-display] field=%llu pmode=%016llx smode2=%016llx dispfb1=%016llx display1=%016llx dispfb2=%016llx display2=%016llx bgcolor=%016llx\n",
+            (unsigned long long)fieldIndex, (unsigned long long)regs19[0],
+            (unsigned long long)regs19[2], (unsigned long long)regs19[7],
+            (unsigned long long)regs19[8], (unsigned long long)regs19[9],
+            (unsigned long long)regs19[10], (unsigned long long)regs19[14]);
+    }
     copyBridgeReadback(*this, m_gsBackend, "post-vsync");
     // Capture selection is part of the same serialized field transition as
     // vsync/direct present.  The SDL event thread must never query a moving
@@ -3044,7 +3075,7 @@ void PS2Runtime::run()
         constexpr uint32_t kArgBlock = 0x00082000u; // PCSX2 EELOAD_START
         const char *argv0 = std::getenv("RRV_BOOT_ARGV0");
         if (!argv0)
-            argv0 = "cdrom0:\\SLUS_200.02;1";
+            argv0 = "cdrom0:\\SLUS_209.11;1"; // Magatama: Shin Megami Tensei: Nocturne (USA)
         const size_t len = std::strlen(argv0);
         if (len != 0 && len < 0xF0u)
         {

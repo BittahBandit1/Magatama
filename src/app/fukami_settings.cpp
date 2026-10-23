@@ -259,9 +259,9 @@ const std::vector<Spec> &schema()
     static const std::vector<Spec> specs = {
         // [display]
         {"display", "ratio", "Widescreen", "Real widescreen: the game renders a wider view. 4:3 is the stock game.",
-         Kind::choice, "16:9", {"4:3", "16:9", "16:10", "21:9"}},
+         Kind::choice, "16:9", {"4:3", "16:9", "16:10", "21:9"}, 0, 0, Apply::restart, false}, // Magatama: RR5 camera patch
         {"display", "hud", "HUD", "How 2D (HUD, menus, text) shows on a wide picture.",
-         Kind::choice, "race", {"stretch", "fixed", "race"}},
+         Kind::choice, "race", {"stretch", "fixed", "race"}, 0, 0, Apply::restart, false}, // Magatama: RR5 HUD
         {"display", "aspect", "Picture fit", "How the picture fits the window. Empty follows Widescreen.",
          Kind::choice, "", {"", "auto", "4:3", "16:9", "16:10", "21:9", "stretch"}, 0, 0, Apply::live},
         {"display", "window", "Window size", "Starting window size, WIDTHxHEIGHT. Empty is automatic.",
@@ -323,7 +323,7 @@ const std::vector<Spec> &schema()
         // Host enhancement (PCSX2 "Bilinear (Forced excluding sprite)"). RR5 asks for point sampling on its car
         // textures only (TEX1 MMAG=NEAREST), so this is what smooths the cars; 2D sprites keep the game's filter.
         {"rendering", "texture_filter", "Texture filtering",
-         "PS2: as the game asks (car textures show their pixels). Bilinear: smooths every 3D texture, cars included.",
+         "PS2: as the game asks. Bilinear: smooths every 3D texture.",
          Kind::choice, "ps2", {"ps2", "bilinear"}},
         // Host enhancement, on by default (owner request 2026-10-12; docs/TESTING.md T-SPRITE-COVERAGE). RR5 draws
         // its 2D as point-sampled sprites, which come out even only when a texel covers a whole number of output
@@ -351,22 +351,22 @@ const std::vector<Spec> &schema()
          Kind::boolean, "true"},
         // [game]
         {"game", "car_lod", "Car detail distance", "Keeps cars detailed farther away. 1 is the stock game.",
-         Kind::number, "4", {}, 1, 16},
+         Kind::number, "4", {}, 1, 16, Apply::restart, false}, // Magatama: RR5 only
         {"game", "draw_distance", "Scenery draw distance",
          "Draws track scenery this many sections further ahead. 0 is the stock game; 2 is the sweet spot.",
-         Kind::integer, "0", {}, 0, 16},
+         Kind::integer, "0", {}, 0, 16, Apply::restart, false}, // Magatama: RR5 only
         {"game", "fast_unpack", "Fast loading",
          "Unpacks loaded game data instantly, so loading does not freeze the picture. Off is the stock game's timing.",
-         Kind::boolean, "true"},
+         Kind::boolean, "true", {}, 0, 0, Apply::restart, false}, // Magatama: RR5's unpacker
         {"game", "native_code", "Native hot code",
          "Runs the game's busiest code as native code: same result, less CPU. Off runs all of it as recompiled code.",
-         Kind::boolean, "true"},
+         Kind::boolean, "true", {}, 0, 0, Apply::restart, false}, // Magatama: none generated for Nocturne yet
         // Experimental (menu page "Experimental"): removes the hatch of T-DECK-3X-HATCH in a race, but part of the
         // hood of the car sliding into the selection screen turns black (docs/TESTING.md). Off by default.
         {"game", "car_depth_fix", "Car paint depth fix",
          "Experimental. Draws a car's second paint layer and reflection a hair in front of the paint, for hatched "
          "panels at odd resolutions. Known fault: dark patches on the car in the selection screen.",
-         Kind::boolean, "false", {}, 0, 0, Apply::restart, true, true},
+         Kind::boolean, "false", {}, 0, 0, Apply::restart, false, true}, // Magatama: RR5 only
         // Logs: off by default. Off, the launcher creates no session folder and writes no file (logs, pad record,
         // start clocks, the card copy); the game's stdout/stderr go nowhere. Takes effect on restart.
         {"game", "logging", "Write logs",

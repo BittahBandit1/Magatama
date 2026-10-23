@@ -4,7 +4,7 @@ Applied after product-host/SPR transformations. Every edit requires one exact
 anchor; this module neither opens nor modifies the immutable producer checkout.
 The ordinary (control OFF) branches retain their original implementation.
 """
-from m2_causal_overlay import replace_once, replace_once_in_region
+from gs_control_anchors import replace_once, replace_once_in_region
 
 
 def add(text, anchor, insertion, label):
@@ -162,8 +162,9 @@ def memory_cpp(text):
         }
     }
 ''', 'GS DMA pending admission')
-    text = replace_once(text, '    const bool hadVif1 = !m_pendingVif1Transfers.empty();\n',
-                        '    bool hadVif1 = !m_pendingVif1Transfers.empty();\n', 'GS VIF completion eligibility')
+    if 'void PS2Memory::completePendingTransfersV1(' not in text:
+        text = replace_once(text, '    const bool hadVif1 = !m_pendingVif1Transfers.empty();\n',
+                            '    bool hadVif1 = !m_pendingVif1Transfers.empty();\n', 'GS VIF completion eligibility')
     anchor = '    static constexpr uint32_t GIF_CHANNEL = 0x1000A000;\n'
     text = replace_once(text, anchor, '''    if (m_gsControl.enabled())
     {
@@ -183,7 +184,7 @@ def memory_cpp(text):
                '        ((address == 0x1000a000u && !m_gsBlockedGifTransfers.empty()) ||\n'
                '         (address == 0x10009000u && (m_gsVif1CompletionPending || !m_gsDeferredVif1.empty()))))\n'
                '        return m_ioRegisters[address];\n', 'GS pending DMA STR reads')
-    text = replace_once_in_region(text, 'bool PS2Memory::armPath3Pacer()\n',
+    text = replace_once_in_region(text, 'bool PS2Memory::armPath3Pacer(',
                'void PS2Memory::pacePath3()\n',
                '        if (p.chainData.empty())\n',
                '        if (p.chainData.empty() || p.gsOwnedNormal)\n',

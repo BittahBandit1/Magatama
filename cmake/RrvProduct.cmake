@@ -313,3 +313,19 @@ if(APPLE)
 else()
     message(STATUS "RRV product: direct PCSX2 Vulkan presentation through SDL 2.32.10")
 endif()
+
+# Source-owned Nocturne targets add their original include roots explicitly.
+# Keep the complete GS-control header closure first for every layout consumer.
+if(MAGATAMA_GAME AND RRV_PRODUCT_OWNED_SOURCE AND RRV_GS_PRODUCER_CONTROL)
+    get_property(_magatama_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_target IN LISTS _magatama_targets)
+        get_target_property(_kind ${_target} TYPE)
+        if(_kind STREQUAL "STATIC_LIBRARY" OR _kind STREQUAL "SHARED_LIBRARY" OR
+           _kind STREQUAL "OBJECT_LIBRARY" OR _kind STREQUAL "EXECUTABLE")
+            target_include_directories(${_target} BEFORE PRIVATE
+                "${CMAKE_BINARY_DIR}/gs-control-overlay/include"
+                "${CMAKE_BINARY_DIR}/gs-control-overlay/src/lib/Kernel"
+                "${CMAKE_SOURCE_DIR}/src/gs-control")
+        endif()
+    endforeach()
+endif()

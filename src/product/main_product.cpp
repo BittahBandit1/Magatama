@@ -1009,7 +1009,7 @@ int main(int argc, char **argv)
         const std::filesystem::path executable = std::filesystem::absolute(argv[0]);
         std::filesystem::current_path(executable.parent_path());
         const char *gameName = getGameName(elf.filename().string().c_str());
-        std::string title = "Fukami | ";
+        std::string title = "Magatama | ";
         title += gameName ? gameName : elf.filename().string();
 
         const bool gate3Headless = gate3HeadlessRequestedV1();

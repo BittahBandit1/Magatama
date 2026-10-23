@@ -24,15 +24,25 @@ set(RRV_GENERATION_MANIFEST "" CACHE FILEPATH
 set(RRV_PCSX2_GS_BRIDGE_MANIFEST "" CACHE FILEPATH
     "Manifest emitted by scripts/build_pcsx2_gs_bridge.sh")
 
+# Magatama: build Shin Megami Tensei: Nocturne (USA, SLUS_209.11) from generated/nocturne instead of
+# Ridge Racer V's generated/rr5. Skips the RR5 source-manifest verification and accepts the PCSX2 GS bridge
+# built by the Fukami checkout (its manifest records that checkout's commit, not this one).
+option(MAGATAMA_GAME "Magatama: build Nocturne from generated/nocturne" OFF)
 if(RRV_PRODUCT_OWNED_SOURCE)
-    if(NOT RRV_BUILD_PRODUCT OR RRV_GS_PRODUCER_CONTROL OR RRV_M2_CAUSAL_TRACE OR
+    if(NOT RRV_BUILD_PRODUCT OR (RRV_GS_PRODUCER_CONTROL AND NOT MAGATAMA_GAME) OR RRV_M2_CAUSAL_TRACE OR
        RRV_M2P_PAD_OBSERVER OR RRV_M2P_GAME001_FAIL_CLOSED)
         message(FATAL_ERROR "RRV_PRODUCT_OWNED_SOURCE is the plain product only (no diagnostic overlays)")
     endif()
     set(RRV_PS2RECOMP_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third_party/ps2recomp" CACHE PATH "" FORCE)
-    set(RRV_GENERATED_SOURCE_DIR "${CMAKE_SOURCE_DIR}/generated/rr5/output" CACHE PATH "" FORCE)
-    set(RRV_GENERATION_MANIFEST "${CMAKE_SOURCE_DIR}/generated/rr5/gate3-accounted-generation-manifest.json"
-        CACHE FILEPATH "" FORCE)
+    if(MAGATAMA_GAME)
+        set(RRV_GENERATED_SOURCE_DIR "${CMAKE_SOURCE_DIR}/generated/nocturne/output" CACHE PATH "" FORCE)
+        set(RRV_GENERATION_MANIFEST "${CMAKE_SOURCE_DIR}/generated/nocturne/source-manifest.json"
+            CACHE FILEPATH "" FORCE)
+    else()
+        set(RRV_GENERATED_SOURCE_DIR "${CMAKE_SOURCE_DIR}/generated/rr5/output" CACHE PATH "" FORCE)
+        set(RRV_GENERATION_MANIFEST "${CMAKE_SOURCE_DIR}/generated/rr5/gate3-accounted-generation-manifest.json"
+            CACHE FILEPATH "" FORCE)
+    endif()
 endif()
 foreach(required_path IN ITEMS RRV_PS2RECOMP_SOURCE_DIR RRV_GENERATED_SOURCE_DIR)
     if(NOT IS_ABSOLUTE "${${required_path}}")
@@ -136,7 +146,20 @@ if(WIN32)
     endforeach()
 endif()
 
-if(RRV_PRODUCT_OWNED_SOURCE)
+if(RRV_PRODUCT_OWNED_SOURCE AND MAGATAMA_GAME)
+    # Magatama: generated/nocturne/source-manifest.json names the ELF the game code came from.
+    file(READ "${CMAKE_SOURCE_DIR}/generated/nocturne/source-manifest.json" RRV_SOURCE_MANIFEST_TEXT)
+    string(JSON RRV_GAME_ELF_SHA256 GET "${RRV_SOURCE_MANIFEST_TEXT}" game_input sha256)
+    if(NOT RRV_GAME_ELF_SHA256 MATCHES "^[0-9a-f]+$")
+        message(FATAL_ERROR "generated/nocturne/source-manifest.json has no game_input.sha256")
+    endif()
+    set(RRV_GENERATION_RRV_COMMIT "magatama")
+    set(RRV_GENERATION_PRODUCER_COMMIT "${RRV_PRODUCER_COMMIT}")
+    set(RRV_GENERATION_HOOK_FINGERPRINT "magatama")
+    file(SHA256 "${CMAKE_SOURCE_DIR}/generated/nocturne/source-manifest.json" RRV_GENERATION_MANIFEST_SHA256)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/generated/nocturne/source-manifest.json")
+elseif(RRV_PRODUCT_OWNED_SOURCE)
     # The runtime and recompiler are ordinary source in this repository; the producer
     # identity below is the recorded provenance of the imported tree (dependencies.lock.toml),
     # and the game code is checked against generated/rr5/source-manifest.json.
@@ -211,10 +234,16 @@ file(SHA256 "${RRV_GENERATION_MANIFEST}" RRV_GENERATION_MANIFEST_SHA256)
 
 endif()
 
+set(RRV_BRIDGE_EXPECTED_RRV_COMMIT "${RRV_SOURCE_COMMIT}")
+if(MAGATAMA_GAME)
+    # The bridge is reused from the Fukami checkout that built it; accept the commit its manifest records.
+    file(READ "${RRV_PCSX2_GS_BRIDGE_MANIFEST}" _magatama_bridge_text)
+    string(JSON RRV_BRIDGE_EXPECTED_RRV_COMMIT GET "${_magatama_bridge_text}" rrv_commit)
+endif()
 execute_process(
     COMMAND "${Python3_EXECUTABLE}" "${RRV_BRIDGE_MANIFEST_VERIFIER_RESOLVED}" verify
         --manifest "${RRV_PCSX2_GS_BRIDGE_MANIFEST}"
-        --expected-rrv-commit "${RRV_SOURCE_COMMIT}"
+        --expected-rrv-commit "${RRV_BRIDGE_EXPECTED_RRV_COMMIT}"
         --expected-pcsx2-commit "${RRV_PCSX2_COMMIT}"
         --expected-bridge-patch-sha256 "${RRV_BRIDGE_PATCH_SHA256}"
         ${RRV_BRIDGE_LINUX_VERIFY_ARGS}
@@ -351,7 +380,7 @@ rrv_select_gs_resource_package(PACKAGE pcsx2-gs MANIFEST "${RRV_RESOURCE_PACKAGE
 add_custom_target(rrv-adr0006-bridge-provenance
     COMMAND "${Python3_EXECUTABLE}" "${RRV_BRIDGE_MANIFEST_VERIFIER_RESOLVED}" verify
         --manifest "${RRV_PCSX2_GS_BRIDGE_MANIFEST}"
-        --expected-rrv-commit "${RRV_SOURCE_COMMIT}"
+        --expected-rrv-commit "${RRV_BRIDGE_EXPECTED_RRV_COMMIT}"
         --expected-pcsx2-commit "${RRV_PCSX2_COMMIT}"
         --expected-bridge-patch-sha256 "${RRV_BRIDGE_PATCH_SHA256}"
         ${RRV_BRIDGE_LINUX_VERIFY_ARGS}
@@ -481,8 +510,11 @@ endif()
 if(RRV_GS_PRODUCER_CONTROL)
     include("${CMAKE_SOURCE_DIR}/cmake/RrvGsControl.cmake")
     set(_rrv_gs_control_include_input "${CMAKE_BINARY_DIR}/product-host/include")
+    if(MAGATAMA_GAME AND RRV_PRODUCT_OWNED_SOURCE)
+        set(_rrv_gs_control_include_input "${RRV_PS2RECOMP_SOURCE_DIR}/ps2xRuntime/include")
+    endif()
     set(_rrv_gs_control_callback_args)
-    if(RRV_CALLBACK_STACK_MAIN_RESERVATION)
+    if(RRV_CALLBACK_STACK_MAIN_RESERVATION AND NOT RRV_PRODUCT_OWNED_SOURCE)
         set(_rrv_gs_control_include_input
             "${CMAKE_BINARY_DIR}/callback-stack-main-reservation-overlay/ps2xRuntime/include")
         list(APPEND _rrv_gs_control_callback_args CALLBACK_STACK_MAIN_RESERVATION)
@@ -588,9 +620,14 @@ if(RRV_GS_PRODUCER_CONTROL AND BUILD_TESTING)
         "$<IF:$<BOOL:$<TARGET_PROPERTY:RRV_GS_FAKE_BRIDGE_VARIANT>>,rrv_legacy_gs_backend_fake_bridge,rrv_legacy_gs_backend>")
 endif()
 
+if(MAGATAMA_GAME)
+    # Nocturne's functions carry Ghidra names (FUN_, entry_, caseD_, sce...), not only sub_: take every .cpp.
+    file(GLOB RRV_LEGACY_GENERATED_SOURCES CONFIGURE_DEPENDS "${RRV_GENERATED_SOURCE_DIR}/*.cpp")
+else()
 file(GLOB RRV_LEGACY_GENERATED_SOURCES CONFIGURE_DEPENDS
     "${RRV_GENERATED_SOURCE_DIR}/sub_*.cpp"
     "${RRV_GENERATED_SOURCE_DIR}/register_functions.cpp")
+endif()
 list(LENGTH RRV_LEGACY_GENERATED_SOURCES RRV_LEGACY_GENERATED_COUNT)
 if(RRV_LEGACY_GENERATED_COUNT EQUAL 0)
     message(FATAL_ERROR "No generated sources found in ${RRV_GENERATED_SOURCE_DIR}")
@@ -695,6 +732,9 @@ add_library(rrv_legacy_stubs STATIC "${CMAKE_SOURCE_DIR}/src/rrv_stubs.cpp")
 set(RRV_LEGACY_STUBS_HEADER_DIR "${RRV_GENERATED_SOURCE_DIR}")
 if(RRV_PRODUCT_OWNED_SOURCE)
     set(RRV_LEGACY_STUBS_HEADER_DIR "${CMAKE_SOURCE_DIR}/generated/rr5/legacy-stubs")
+    if(MAGATAMA_GAME)
+        set(RRV_LEGACY_STUBS_HEADER_DIR "${CMAKE_SOURCE_DIR}/generated/nocturne/legacy-stubs")
+    endif()
 endif()
 target_include_directories(rrv_legacy_stubs PRIVATE
     "${RRV_LEGACY_STUBS_HEADER_DIR}"

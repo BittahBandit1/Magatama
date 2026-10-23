@@ -46,6 +46,7 @@ inline void QuietBumpProducer() {
 #include <string>
 #include <vector>
 #include "runtime/rrv_ipu.h"
+namespace ps2_syscalls { void magatamaDeferDmacCause(uint32_t cause); }
 namespace {
 bool magatamaIpuEnabled() {
     static const bool enabled=[] { const char* p=std::getenv("MAGATAMA_IPU"); return p && p[0]=='1'; }();
@@ -53,16 +54,33 @@ bool magatamaIpuEnabled() {
 }
 template<class Queue>
 void serviceMagatamaIpu(std::unordered_map<uint32_t,uint32_t>& regs, uint8_t* ram, Queue& causes) {
+    static const bool prof=[] { const char* p=std::getenv("MAGATAMA_PROFILE_IPU"); return p && p[0]=='1'; }();
+    static uint64_t profCalls=0, profNs=0, profBusyCalls=0;
+    static auto profLast=std::chrono::steady_clock::now();
+    const auto profStart=std::chrono::steady_clock::now();
+    if(prof && rrv::ipu::ipuRegs.ctrl.BUSY) ++profBusyCalls;
     rrv::ipu::service(regs,ram);
-    for(unsigned cause:rrv::ipu::completed) causes.push_back(cause);
+    if(prof) {
+        const auto now=std::chrono::steady_clock::now();
+        ++profCalls; profNs+=std::chrono::duration_cast<std::chrono::nanoseconds>(now-profStart).count();
+        if(now-profLast>=std::chrono::seconds(2)) {
+            std::fprintf(stderr,"[ipu-prof] 2s: service calls=%llu busy=%llu time=%.1fms out=%llu\n",
+                (unsigned long long)profCalls,(unsigned long long)profBusyCalls,profNs/1e6,
+                (unsigned long long)rrv::ipu::outputBytes);
+            profCalls=profNs=profBusyCalls=0; profLast=now;
+        }
+    }
+    (void)causes; // delivered later from an interrupt-eligible point, see ps2_syscalls::magatamaDeferDmacCause
+    for(unsigned cause:rrv::ipu::completed) ps2_syscalls::magatamaDeferDmacCause(cause);
     rrv::ipu::completed.clear();
     static const bool trace=[] { const char* p=std::getenv("MAGATAMA_TRACE_IPU"); return p && p[0]=='1'; }();
     static uint64_t last=0;
     auto bytes=rrv::ipu::outputBytes;
     if(trace && bytes!=last && (bytes-last>=262144 || !rrv::ipu::ipuRegs.ctrl.BUSY)) {
-        std::fprintf(stderr,"[ipu-decode] input=%llu output=%llu ctrl=%08x top=%08x from_qwc=%u to_qwc=%u\n",
+        std::fprintf(stderr,"[ipu-decode] input=%llu output=%llu ctrl=%08x top=%08x from_qwc=%u to_qwc=%u to_chcr=%08x from_chcr=%08x dstat=%08x ifc=%u\n",
             (unsigned long long)rrv::ipu::inputBytes,(unsigned long long)bytes,
-            rrv::ipu::ipuRegs.ctrl._u32,rrv::ipu::ipuRegs.top,regs[0x1000b020],regs[0x1000b420]);
+            rrv::ipu::ipuRegs.ctrl._u32,rrv::ipu::ipuRegs.top,regs[0x1000b020],regs[0x1000b420],
+            regs[0x1000b400],regs[0x1000b000],regs[0x1000e010],(unsigned)rrv::ipu::g_BP.IFC);
         last=bytes;
     }
 }
@@ -1656,7 +1674,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     return v && v[0] == '1';
                 }();
                 static uint64_t bursts = 0;
-                if (traceIpuDma && (++bursts <= 64 || bursts % 1000 == 0))
+                if (traceIpuDma && (++bursts <= 64 || bursts % 1000 == 0 || std::getenv("MAGATAMA_TRACE_IPU")[1] == '2'))
                     std::fprintf(stderr, "[ipu-dma] n=%llu direction=%s chcr=%08x madr=%08x qwc=%u tadr=%08x\n",
                         (unsigned long long)bursts, channelBase == 0x1000B000u ? "from-ipu" : "to-ipu",
                         value, madr, qwc, m_ioRegisters[channelBase + 0x30]);

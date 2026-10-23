@@ -6,6 +6,8 @@
 # It watches ~/magatama/jobs for a file named next.job. A job may only say three things:
 #   build=1                 rebuild first (scripts/magatama_build.sh)
 #   seconds=<5..120>        how long to let the game run before closing it (SIGTERM = a normal quit)
+#   sample=<5..110>         also profile the game with macOS `sample` for 8 s starting this many seconds in
+#                           (written to ~/magatama/logs/sample-<id>.txt)
 #   env=<NAME>=<VALUE>      a debug switch; NAME must start with RRV_, MAGATAMA_ or MTL_, VALUE is
 #                           letters, digits and , : . _ - only
 # Nothing else in the file is accepted, so a job can never run an arbitrary command. Results go to
@@ -20,11 +22,12 @@ while true; do
     id="$(date +%Y%m%d-%H%M%S)"
     mv "$jobs/next.job" "$jobs/$id.job"
     done_file="$jobs/$id.done"
-    build=0; seconds=15; envs=(); bad=""
+    build=0; seconds=15; sample_at=0; envs=(); bad=""
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         if [[ "$line" == build=1 ]]; then build=1
         elif [[ "$line" =~ '^seconds=([0-9]+)$' ]] && (( match[1] >= 5 && match[1] <= 120 )); then seconds=$match[1]
+        elif [[ "$line" =~ '^sample=([0-9]+)$' ]] && (( match[1] >= 5 && match[1] <= 110 )); then sample_at=$match[1]
         elif [[ "$line" =~ '^env=((RRV_|MAGATAMA_|MTL_)[A-Z0-9_]+)=([A-Za-z0-9,:._-]*)$' ]]; then envs+=("$match[1]=$match[3]")
         else bad="$line"; break
         fi
@@ -37,9 +40,16 @@ while true; do
         fi
     fi
     before="$(ls -t "$HOME/magatama/logs" 2>/dev/null | head -1)"
-    env "${envs[@]}" "$repo/scripts/magatama_run.sh" > /dev/null 2>&1 &
+    env "${envs[@]}" "$repo/scripts/magatama_run.sh" < /dev/null > /dev/null 2>&1 &
     runner=$!
-    sleep "$seconds"
+    if (( sample_at > 0 && sample_at + 8 < seconds )); then
+        sleep "$sample_at"
+        pid="$(pgrep -f "$repo/build/magatama/bin/Fukami" | head -1)"
+        [[ -n "$pid" ]] && sample "$pid" 8 -file "$HOME/magatama/logs/sample-$id.txt" > /dev/null 2>&1
+        sleep $(( seconds - sample_at - 8 ))
+    else
+        sleep "$seconds"
+    fi
     pkill -TERM -f "$repo/build/magatama/bin/Fukami" 2>/dev/null
     for i in {1..20}; do kill -0 $runner 2>/dev/null || break; sleep 0.5; done
     if kill -0 $runner 2>/dev/null; then pkill -KILL -f "$repo/build/magatama/bin/Fukami"; result=killed; else result=ok; fi

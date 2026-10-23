@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <stdexcept>
 
+namespace ps2_syscalls { void magatamaDeliverDeferredDmac(uint8_t* rdram, PS2Runtime* runtime); }
+
 namespace ps2_stubs
 {
     void sceIpuInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -12,8 +14,8 @@ namespace ps2_stubs
         static constexpr uint32_t REG_IPU_IN_FIFO = 0x10007010u;
         const bool nocturne=std::getenv("MAGATAMA_IPU") && std::getenv("MAGATAMA_IPU")[0]=='1';
         // Nocturne sceIpuInit at 0x2CDA58 references these guest tables.
-        const uint32_t IQVAL_BASE = nocturne ? 0x53baa0u : 0x1721e0u;
-        const uint32_t VQVAL_BASE = nocturne ? 0x53baf0u : 0x172230u;
+        const uint32_t IQVAL_BASE = nocturne ? 0x52baa0u : 0x1721e0u; // 0x2CDAD4: lui 0x53; addiu -0x4560
+        const uint32_t VQVAL_BASE = nocturne ? 0x52baf0u : 0x172230u;
         static constexpr uint32_t SETD4_CHCR_ENTRY = 0x126428u;
 
         if (!runtime)
@@ -133,6 +135,9 @@ namespace ps2_stubs
             for(unsigned i=0;i<(poll?1u:1048576u);++i) {
                 const bool busy=(mem.read32(0x10002010)&0x80000000u)!=0;
                 if(!busy || poll) { setReturnS32(ctx,busy?1:0); return; }
+                // The IPU may be waiting for input that only a DMA-completion handler supplies (the next chunk);
+                // those completions are deferred, so let them run while this spins, as they would on hardware.
+                ps2_syscalls::magatamaDeliverDeferredDmac(rdram,runtime);
             }
             throw std::runtime_error("sceIpuSync: decoder stalled waiting for DMA");
         }

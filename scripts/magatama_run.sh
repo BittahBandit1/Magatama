@@ -17,6 +17,12 @@ export RRV_GATE3_REALTIME=1
 # Producer owns GS SIGNAL/FINISH/LABEL; the renderer does not generate these.
 export RRV_GS_CONTROL="${RRV_GS_CONTROL:-producer}"
 export RRV_PCSX2_GS_VSYNC=1
+# Fukami.app's defaults: render the GS on its own worker thread and run VU1 asynchronously, so the cost of drawing a
+# frame does not land on the game thread and make frame times uneven. RRV_GS_EXECUTION=inline restores the old path.
+export RRV_GS_EXECUTION="${RRV_GS_EXECUTION:-worker-sync}"
+[[ "$RRV_GS_EXECUTION" == inline ]] && unset RRV_GS_EXECUTION || export RRV_VU1GS_EXECUTION="${RRV_VU1GS_EXECUTION:-owner-async}"
+export RRV_GS_RENDER_MODE="${RRV_GS_RENDER_MODE:-full}"
+export RRV_PCSX2_GS_FULL_SCALE="${RRV_PCSX2_GS_FULL_SCALE:-4}"
 # Decode movies through the software IPU instead of placeholder MMIO results.
 export MAGATAMA_IPU="${MAGATAMA_IPU:-1}"
 # macOS Metal performance HUD (the per-app toggle only applies to .app bundles; this is a bare executable).
@@ -27,6 +33,10 @@ print "== log: $log"
 build="$repo/build/magatama"
 mkdir -p "$build/bin"
 if [[ ! -f "$build/bin/Fukami" || "$build/candidate-bin/Fukami" -nt "$build/bin/Fukami" ]]; then
+    # Replace the file rather than overwrite it in place: macOS caches a binary's code signature per file, and an
+    # in-place overwrite makes the kernel kill the new build at launch (zsh: killed, exit 137).
+    rm -f "$build/bin/Fukami"
     cp -p "$build/candidate-bin/Fukami" "$build/bin/Fukami"
+    codesign --force --sign - "$build/bin/Fukami" 2>/dev/null || true
 fi
 "$build/bin/Fukami" "$disc/SLUS_209.11" 2>&1 | tee "$log"

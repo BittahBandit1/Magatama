@@ -1,3 +1,6 @@
+#include <deque>
+#include <atomic>
+#include <mutex>
 #include "Common.h"
 #include "Interrupt.h"
 #include "runtime/diag_counters.h"
@@ -39,6 +42,27 @@ void gate3RetireCallback(int id, PS2Runtime* runtime) {
     gate3Cancel(id,runtime,true);
     std::lock_guard lock(g_thread_map_mutex);g_threads.erase(id);
 }
+// Magatama: IPU DMA completions are queued here instead of running their DMAC handlers inside the guest store that
+// finished the transfer. Nocturne's movie code updates its chunk ring with interrupts disabled (DIntr); running the
+// handler in the middle of that section corrupted the ring and stalled the movie. Deliver only from points where
+// the guest could take an interrupt.
+static std::mutex g_deferredDmacMutex;
+static std::deque<uint32_t> g_deferredDmac;
+static std::atomic<bool> g_deliveringDeferredDmac{false};
+void magatamaDeferDmacCause(uint32_t cause) {
+    std::lock_guard lock(g_deferredDmacMutex); g_deferredDmac.push_back(cause);
+}
+void magatamaDeliverDeferredDmac(uint8_t* rdram, PS2Runtime* runtime) {
+    if (g_deliveringDeferredDmac.exchange(true)) return;
+    for (unsigned guard = 0; guard < 4096; ++guard) {
+        uint32_t cause;
+        { std::lock_guard lock(g_deferredDmacMutex);
+          if (g_deferredDmac.empty()) break;
+          cause = g_deferredDmac.front(); g_deferredDmac.pop_front(); }
+        dispatchDmacHandlersForCause(rdram, runtime, cause);
+    }
+    g_deliveringDeferredDmac.store(false);
+}
 void gate3DeliverTemporal(uint8_t* rdram,R5900Context* ctx,PS2Runtime* runtime) {
     auto& owner=runtime->gate3TemporalV1();
     auto& intc=owner.intc();
@@ -48,6 +72,7 @@ void gate3DeliverTemporal(uint8_t* rdram,R5900Context* ctx,PS2Runtime* runtime) 
         runtime->gate3RunCallbackV1(ctx,a.handler,a.gp,alarm->first,a.ticks,a.arg,false,1);
     }
     if(!intc.InterruptEligible(ctx->cop0_status))return;
+    magatamaDeliverDeferredDmac(rdram,runtime);
     if(intc.ReadStat()&2)owner.timers().latch_holds_on_eligible_sbus_intc_exception_at(owner.now());
     std::vector<IrqHandlerInfo> handlers;
     const uint32_t pending=intc.Read().pending;

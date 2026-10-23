@@ -23,6 +23,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -77,13 +79,27 @@ std::map<uint32_t, std::atomic<uint64_t>>& fnHitCount() {
     static std::map<uint32_t, std::atomic<uint64_t>> m;
     return m;
 }
+std::map<uint32_t, std::atomic<uint64_t>>& fnHitNs() {   // host time spent inside (including callees)
+    static std::map<uint32_t, std::atomic<uint64_t>> m;
+    return m;
+}
 void fnHitTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
     const uint32_t entry = ctx->pc;
     if (auto it = fnHitCount().find(entry); it != fnHitCount().end()) {
         it->second.fetch_add(1, std::memory_order_relaxed);
     }
+    // MAGATAMA_FN_TRACE=1 also logs each entry with the guest frame (first 6000 entries).
+    static const bool fnTrace = [] { const char* v = std::getenv("MAGATAMA_FN_TRACE"); return v && v[0] == '1'; }();
+    static std::atomic<uint64_t> fnTraced{0};
+    if (fnTrace && fnTraced.fetch_add(1, std::memory_order_relaxed) < 200000) {
+        std::fprintf(stderr, "[fn] f=%llu pc=%08x a0=%08x ra=%08x\n",
+            (unsigned long long)runtime->gate3TemporalV1().starts(), entry, GPR_U32(ctx, 4), GPR_U32(ctx, 31));
+    }
     if (auto it = fnHitOrig().find(entry); it != fnHitOrig().end() && it->second) {
+        const auto t0 = std::chrono::steady_clock::now();
         it->second(rdram, ctx, runtime);
+        fnHitNs()[entry].fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
     } else if (ctx->pc == entry) {
         std::fprintf(stderr, "[fn-hits] %08x has no body to forward to\n", entry);
         ctx->pc = GPR_U32(ctx, 31);
@@ -94,7 +110,8 @@ void dumpFnHits() {
     for (const auto& [addr, count] : fnHitCount()) {
         const uint64_t c = count.load(std::memory_order_relaxed);
         total += c;
-        if (c) std::fprintf(stderr, "[fn-hits] %08x %llu\n", addr, static_cast<unsigned long long>(c));
+        if (c) std::fprintf(stderr, "[fn-hits] %08x %llu  %.1f ms total\n", addr, static_cast<unsigned long long>(c),
+                            fnHitNs()[addr].load(std::memory_order_relaxed) / 1e6);
     }
     std::fprintf(stderr, "[fn-hits] %zu armed, %llu entries\n", fnHitCount().size(),
                  static_cast<unsigned long long>(total));
@@ -116,6 +133,7 @@ void armFnHits(PS2Runtime& runtime, const char* spec) {
         if (!addr) continue;
         fnHitOrig()[addr] = runtime.hasFunction(addr) ? runtime.lookupFunction(addr) : nullptr;
         (void)fnHitCount()[addr];
+        (void)fnHitNs()[addr];
         runtime.registerFunction(addr, fnHitTrampoline);
     }
     std::atexit(dumpFnHits);
@@ -227,6 +245,46 @@ void armCdLatency(PS2Runtime& runtime) {
         cdLatencyOrig()[addr] = runtime.lookupFunction(addr);
         runtime.registerFunction(addr, cdLatencyTrampoline);
     }
+}
+} // namespace
+
+// FUN_002ADA68 (start of a frame) first spins on the byte at gp-0x28E5 until the previous frame's GS work is
+// done; an interrupt handler clears it (FUN_002ADB68). Recompiled, every pass of that 3-instruction loop costs a
+// full Gate-3 checkpoint but only a few guest cycles, so guest time crawls while it spins: with movies playing the
+// whole game dropped to about a third of real speed. Park the thread in guest time until the flag clears (exactly
+// what the spin waits for), then run the function, which finds the flag clear and carries on.
+namespace {
+PS2Runtime::RecompiledFunction g_frameWaitOrig;
+void frameWaitTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t flag = (GPR_U32(ctx, 28) - 0x28E5u) & 0x01FFFFFFu;
+    if (rdram[flag] != 0) {
+        const R5900Context saved = *ctx;
+        ps2_syscalls::gate3TemporalWait(rdram, ctx, runtime, [rdram, flag] { return rdram[flag] == 0; });
+        *ctx = saved;
+    }
+    g_frameWaitOrig(rdram, ctx, runtime);
+}
+void armFrameWait(PS2Runtime& runtime) {
+    if (!runtime.hasFunction(0x2ADA68u)) return;
+    g_frameWaitOrig = runtime.lookupFunction(0x2ADA68u);
+    runtime.registerFunction(0x2ADA68u, frameWaitTrampoline);
+}
+} // namespace
+
+// EIntr (0x2E40B8) re-enables interrupts; deliver IPU DMA completions that arrived while they were off.
+namespace ps2_syscalls { void magatamaDeliverDeferredDmac(uint8_t* rdram, PS2Runtime* runtime); }
+namespace {
+PS2Runtime::RecompiledFunction g_eintrOrig;
+void eintrTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    g_eintrOrig(rdram, ctx, runtime);
+    const __m128i v0 = ctx->r[2];
+    ps2_syscalls::magatamaDeliverDeferredDmac(rdram, runtime);
+    ctx->r[2] = v0;
+}
+void armEintrDelivery(PS2Runtime& runtime) {
+    if (!runtime.hasFunction(0x2E40B8u)) return;
+    g_eintrOrig = runtime.lookupFunction(0x2E40B8u);
+    runtime.registerFunction(0x2E40B8u, eintrTrampoline);
 }
 } // namespace
 
@@ -514,6 +572,73 @@ void armSilentSound(PS2Runtime& runtime) {
 }
 } // namespace
 
+// Silent movie audio. Nocturne's movies (.IPS) interleave audio with video. The demuxer copies audio into a 64 KB
+// ring that the IOP sound driver drains by calling back into the EE (RPC -> FUN_002c2218's registered provider,
+// 0x2C5098 here, "give me n bytes"). With no IOP driver nothing drains it, the ring fills, and the reader stops
+// issuing disc reads (FUN_002c55f0 requires 16 KB of free audio space), so the video ring starves and the movie
+// freezes after ~20 frames. Video timing is driven by the game's own frame tick (FUN_002c4d30), so here, after
+// each tick, the provider is asked for audio exactly as the IOP would, and the bytes are discarded.
+namespace {
+PS2Runtime::RecompiledFunction g_movieTickOrig;
+inline uint32_t guestWord(const uint8_t* rdram, uint32_t addr) {
+    uint32_t v; std::memcpy(&v, rdram + (addr & 0x01FFFFFFu), 4); return v;
+}
+void silentMovieTick(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    g_movieTickOrig(rdram, ctx, runtime);
+    const uint32_t gp = GPR_U32(ctx, 28);
+    const uint32_t provider = guestWord(rdram, gp - 0x27ACu);
+    const uint32_t stream = guestWord(rdram, gp - 0x2008u);
+    if (provider != 0x2C5098u || stream == 0) return;
+    const uint32_t movie = guestWord(rdram, stream + 0x1Cu);
+    if (!movie) return;
+    // The tick runs from the game's frame callback, where the provider's WaitSema must not be called, so apply the
+    // provider's own bookkeeping directly: fill (0x68) -= n, read offset (0x64) += n modulo the 64 KB ring.
+    // A demuxer store racing with this simply overwrites one drain step; the audio itself is discarded.
+    constexpr uint32_t kChunk = 0x1000u;   // keep the ring at most half full so reads never stall on audio
+    auto put = [rdram](uint32_t addr, uint32_t v) { std::memcpy(rdram + (addr & 0x01FFFFFFu), &v, 4); };
+    static const bool traceMovie = [] { const char* v = std::getenv("MAGATAMA_TRACE_MOVIE"); return v && v[0] == '1'; }();
+    if (traceMovie) {
+        static uint64_t n = 0;
+        if (++n % 30 == 1)
+            std::fprintf(stderr, "[movie] ms=%lld f=%llu state=%u video=%08x afill=%08x aread=%08x a6c=%08x skip=%08x left=%08x\n",
+                (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count() % 1000000,
+                (unsigned long long)runtime->gate3TemporalV1().starts(), rdram[(stream + 1u) & 0x01FFFFFFu],
+                guestWord(rdram, movie + 0x5Cu), guestWord(rdram, movie + 0x68u), guestWord(rdram, movie + 0x64u),
+                guestWord(rdram, movie + 0x6Cu), guestWord(rdram, movie + 0x70u), guestWord(rdram, stream + 0x18u));
+        const uint32_t player = guestWord(rdram, gp - 0x2028u);
+        if (player) {
+            auto b = [rdram, player](uint32_t o) { return (unsigned)rdram[(player + o) & 0x01FFFFFFu]; };
+            std::fprintf(stderr, "[player] obj=%08x decoding=%08x todma=%08x c=%u e=%u f=%u 10=%u 11=%u 12=%u 13=%u "
+                "1a=%u 50=%u 51=%u ring=%u head=%u 64=%u 65=%u\n", player, guestWord(rdram, gp - 0x201Cu),
+                guestWord(rdram, gp - 0x2018u), b(0xC), b(0xE), b(0xF), b(0x10), b(0x11), b(0x12), b(0x13), b(0x1A),
+                b(0x50), b(0x51), b(0x52), b(0x53), b(0x64), b(0x65));
+        }
+    }
+    // While 0x70 > 0 the provider serves a lead-in from 0x74 instead of the ring; consume it the same way.
+    if (const int32_t lead = static_cast<int32_t>(guestWord(rdram, movie + 0x70u)); lead > 0) {
+        put(movie + 0x70u, static_cast<uint32_t>(lead - static_cast<int32_t>(kChunk)));
+        put(movie + 0x74u, guestWord(rdram, movie + 0x74u) + kChunk);
+        return;
+    }
+    for (int i = 0; i < 16; ++i) {
+        const uint32_t fill = guestWord(rdram, movie + 0x68u);
+        if (fill <= 0x8000u || fill > 0x10000u) break;
+        uint32_t read = guestWord(rdram, movie + 0x64u) + kChunk;
+        if (read > 0xFFFFu) read -= 0x10000u;
+        put(movie + 0x68u, fill - kChunk);
+        put(movie + 0x64u, read);
+    }
+}
+void armSilentMovieAudio(PS2Runtime& runtime) {
+    if (!runtime.hasFunction(0x2C4D30u) || !runtime.hasFunction(0x2C5098u))
+        throw std::runtime_error("Nocturne movie audio targets missing");
+    g_movieTickOrig = runtime.lookupFunction(0x2C4D30u);
+    runtime.registerFunction(0x2C4D30u, silentMovieTick);
+    std::fprintf(stderr, "[sound-silent] movie audio is drained silently\n");
+}
+} // namespace
+
 // The title-screen freeze waits for the game's IOP sound status. Observe the
 // EE command queue and SIF traffic without manufacturing a success response.
 namespace {
@@ -608,6 +733,10 @@ void registerPatches(PS2Runtime& runtime)
     if (const char* lat = std::getenv("MAGATAMA_CD_LATENCY"); !(lat && lat[0] == '0')) {
         armCdLatency(runtime);
     }
+    armEintrDelivery(runtime);
+    if (const char* fw = std::getenv("MAGATAMA_FRAME_WAIT"); !(fw && fw[0] == '0')) {
+        armFrameWait(runtime);
+    }
     if (const char* al = std::getenv("MAGATAMA_TRACE_ALLOC"); al && al[0] == '1') {
         armAllocTrace(runtime);
     }
@@ -622,6 +751,7 @@ void registerPatches(PS2Runtime& runtime)
     }
     if (const char* silent = std::getenv("MAGATAMA_SILENT_SOUND"); silent && silent[0] == '1') {
         armSilentSound(runtime);
+        armSilentMovieAudio(runtime);
     }
     if (const char* snd = std::getenv("MAGATAMA_TRACE_SOUND"); snd && snd[0] == '1') {
         armSoundTrace(runtime);

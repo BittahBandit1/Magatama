@@ -4,6 +4,8 @@
 // pcsx2/Gif_Unit.cpp (Gif_HandlerAD, Gif_FinishIRQ), pcsx2/GS.cpp
 // (gsCSRwrite, IMRwrite, gsWrite8/16/32/64/128). This is not GPU completion.
 #pragma once
+#include <cstdio>
+#include <cstdlib>
 
 #include <cstdint>
 #include <functional>
@@ -37,6 +39,10 @@ public:
     }
     bool enabled() const { return enabled_; }
     bool stalled() const { return signalQueued_; }
+    static uint64_t* transferRegs() { static uint64_t regs[3] = {}; return regs; }
+    uint64_t debugCsr() const { return regs_ ? regs_[15] : 0; }
+    static bool& afterFinishTrace() { static bool on = false; return on; }
+    static bool& readbackArmed() { static bool armed = false; return armed; }
     bool finishPending() const { return finishPending_; }
     bool finishFired() const { return finishFired_; }
     const Counters& counters() const { return counts_; }
@@ -46,6 +52,10 @@ public:
     // cursor and must stop progression across all paths until acknowledgement.
     bool onAD(uint8_t reg, uint64_t data) {
         if (!enabled_) return false;
+        // Magatama: remember the transfer registers so a local->host readback through the VIF1 FIFO
+        // (BUSDIR=1, VIF1 DMA towards memory) can be served from the renderer's local memory.
+        if (reg >= 0x50 && reg <= 0x52) transferRegs()[reg - 0x50] = data;
+        else if (reg == 0x53) readbackArmed() = (data & 3) == 1;
         if (reg == 0x60) {
             ++counts_.signals;
             if (csr() & 1) {
@@ -61,6 +71,10 @@ public:
                 csr() |= 1;
             }
         } else if (reg == 0x61) {
+            static const bool trace = [] { const char* v = std::getenv("MAGATAMA_TRACE_IRQTAG"); return v && v[0] == '1'; }();
+            if (trace) std::fprintf(stderr, "[gs-control] FINISH decoded (csr=%llx imr=%llx)\n",
+                (unsigned long long)csr(), (unsigned long long)imr());
+            if (trace) afterFinishTrace() = true;
             ++counts_.finishes;
             finishFired_ = false;
             finishPending_ = true;

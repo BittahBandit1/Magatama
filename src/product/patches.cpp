@@ -257,6 +257,9 @@ void armCdLatency(PS2Runtime& runtime) {
 namespace {
 PS2Runtime::RecompiledFunction g_frameWaitOrig;
 void frameWaitTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    // MAGATAMA_GS_TRACE_AT=<frame>: start an armed RRV_GS_TRACE capture once the guest frame count reaches <frame>.
+    static const uint64_t traceAt = [] { const char* v = std::getenv("MAGATAMA_GS_TRACE_AT"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
+    if (traceAt && runtime->gate3TemporalV1().starts() >= traceAt) rrv::gstrace::trigger();
     const uint32_t flag = (GPR_U32(ctx, 28) - 0x28E5u) & 0x01FFFFFFu;
     if (rdram[flag] != 0) {
         const R5900Context saved = *ctx;
@@ -286,6 +289,31 @@ void armEintrDelivery(PS2Runtime& runtime) {
     if (!runtime.hasFunction(0x2E40B8u)) return;
     g_eintrOrig = runtime.lookupFunction(0x2E40B8u);
     runtime.registerFunction(0x2E40B8u, eintrTrampoline);
+}
+} // namespace
+
+// MAGATAMA_TRACE_LOADWAIT=1: FUN_00296B28 spins on FUN_00296AC8(obj) until a loaded object is ready
+// (obj+0 type, obj+1 state == 6, and for type 1 the unpacked flag at obj+0x68). Sample what it is waiting on.
+namespace {
+PS2Runtime::RecompiledFunction g_loadReadyOrig;
+void loadReadyTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t obj = GPR_U32(ctx, 4);
+    g_loadReadyOrig(rdram, ctx, runtime);
+    static uint64_t n = 0;
+    if (++n % 50000 == 1) {
+        auto b = [rdram](uint32_t a) { return (unsigned)rdram[a & 0x01FFFFFFu]; };
+        uint32_t w[8]; for (int i = 0; i < 8; ++i) std::memcpy(&w[i], rdram + ((obj + 4u * i) & 0x01FFFFFFu), 4);
+        uint16_t f68; std::memcpy(&f68, rdram + ((obj + 0x68u) & 0x01FFFFFFu), 2);
+        const uint32_t q = 0x575618u;
+        std::fprintf(stderr, "[loadwait] n=%llu obj=%08x type=%u state=%u ready=%u unpacked=%u words=%08x %08x %08x %08x %08x %08x %08x %08x "
+            "queue: head=%u count=%u seq=%u\n", (unsigned long long)n, obj, b(obj), b(obj + 1), GPR_U32(ctx, 2), f68,
+            w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], b(q + 4), b(q + 6), b(q + 7));
+    }
+}
+void armLoadWaitTrace(PS2Runtime& runtime) {
+    if (!runtime.hasFunction(0x296AC8u)) return;
+    g_loadReadyOrig = runtime.lookupFunction(0x296AC8u);
+    runtime.registerFunction(0x296AC8u, loadReadyTrampoline);
 }
 } // namespace
 
@@ -744,6 +772,7 @@ void registerPatches(PS2Runtime& runtime)
         armCdLatency(runtime);
     }
     armEintrDelivery(runtime);
+    if (const char* lw = std::getenv("MAGATAMA_TRACE_LOADWAIT"); lw && lw[0] == '1') armLoadWaitTrace(runtime);
     if (const char* fw = std::getenv("MAGATAMA_FRAME_WAIT"); !(fw && fw[0] == '0')) {
         armFrameWait(runtime);
     }

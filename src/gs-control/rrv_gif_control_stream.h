@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -113,6 +114,11 @@ public:
                 otherPathsPending |= path != cursor_.activePath && pendingPath(path);
             // Mirrors Execute's checkPaths(APATH != n, ..., true) boundary,
             // not admission, GS consumption, or GPU completion.
+            if (otherPathsPending && control_.finishPending() && Control::afterFinishTrace()) {
+                static int n = 0;
+                if (n++ < 20) std::fprintf(stderr, "[after-finish] FINISH held: active=%u pending p1=%d p2=%d p3=%d records=%zu\n",
+                    cursor_.activePath, pendingPath(1), pendingPath(2), pendingPath(3), records_.size());
+            }
             control_.finishEligible(otherPathsPending);
             draining_ = false;
         } catch (...) {
@@ -124,6 +130,7 @@ public:
         }
     }
 
+    bool queued() const { return !records_.empty() || !staged_.empty(); }
     bool pending() const { return cursor_.activePath || !records_.empty() || !staged_.empty(); }
     bool pendingPath(uint8_t path) const {
         if (path < 1 || path > 3) return false;

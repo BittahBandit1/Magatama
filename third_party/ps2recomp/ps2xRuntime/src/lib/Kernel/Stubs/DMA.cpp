@@ -167,7 +167,16 @@ namespace ps2_stubs
 
     void sceDmaRecvN(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        TODO_NAMED("sceDmaRecvN", rdram, ctx, runtime);
+        // Normal-mode transfer towards memory (CHCR.DIR=0). Nocturne uses it on VIF1 to read GS local
+        // memory back through the FIFO; the memory layer serves that from the renderer.
+        if (!runtime) { setReturnS32(ctx, -1); return; }
+        const uint32_t channelBase = resolveDmaChannelBase(rdram, getRegU32(ctx, 4));
+        if (channelBase == 0) { setReturnS32(ctx, -1); return; }
+        PS2Memory &mem = runtime->memory();
+        mem.writeIORegister(channelBase + 0x20u, normalizeQwcFromArg(getRegU32(ctx, 6)) & 0xFFFFu);
+        mem.writeIORegister(channelBase + 0x10u, toDmaPhys(getRegU32(ctx, 5)));
+        mem.writeIORegister(channelBase + 0x00u, 0x00000180u); // normal mode, DIR=0, TIE, STR
+        setReturnS32(ctx, 0);
     }
 
     void sceDmaReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

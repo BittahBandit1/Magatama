@@ -47,6 +47,8 @@ inline void QuietBumpProducer() {
 #include <vector>
 #include "runtime/rrv_ipu.h"
 namespace ps2_syscalls { void magatamaDeferDmacCause(uint32_t cause); }
+std::function<bool(uint8_t*, uint32_t)> g_magatamaVif1Readback;
+static uint32_t magatamaReadIORegisterTraced(uint32_t address, uint32_t value);
 namespace {
 bool magatamaIpuEnabled() {
     static const bool enabled=[] { const char* p=std::getenv("MAGATAMA_IPU"); return p && p[0]=='1'; }();
@@ -1085,7 +1087,9 @@ uint64_t PS2Memory::read64(uint32_t address)
     {
         rrv::guest_time::QuietBump();
         uint64_t *reg = gsRegPtr(gs_regs, address);
-        return reg ? *reg : 0;
+        const uint64_t v = reg ? *reg : 0;
+        if (rrv::gs::Control::afterFinishTrace()) magatamaReadIORegisterTraced(address, uint32_t(v));
+        return v;
     }
 
     const bool scratch = isScratchpad(address);
@@ -1680,6 +1684,21 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         value, madr, qwc, m_ioRegisters[channelBase + 0x30]);
             }
 
+            if (rrv::gs::Control::afterFinishTrace()) {
+                static int n = 0;
+                if (n++ < 200) std::fprintf(stderr, "[after-finish] dma-start ch=%08x chcr=%08x madr=%08x qwc=%u tadr=%08x\n",
+                    channelBase, value, madr, qwc, m_ioRegisters[channelBase + 0x30]);
+            }
+            // Magatama: VIF1 towards memory (CHCR.DIR=0) with BUSDIR set is a GS local->host readback.
+            if (channelBase == 0x10009000u && (value & 1u) == 0u && qwc != 0u && g_magatamaVif1Readback) {
+                const uint32_t bytes = qwc * 16u;
+                const uint32_t dst = madr & 0x01FFFFF0u;
+                if (dst + bytes <= PS2_RAM_SIZE && g_magatamaVif1Readback(m_rdram + dst, bytes)) {
+                    m_ioRegisters[channelBase + 0x10] = madr + bytes;
+                    completePendingTransfersV1(false, false, true);
+                    return true;
+                }
+            }
             if (magatamaIpuEnabled() && (channelBase==0x1000B000u || channelBase==0x1000B400u)) {
                 if (channelBase==0x1000B000u && (value & 0xcu)!=0) throw std::runtime_error("from-IPU chain DMA is not implemented");
                 if (channelBase==0x1000B400u && (value & 0x100u)) rrv::ipu::chainEnded=false; // a new to-IPU transfer
@@ -2405,6 +2424,22 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             std::fprintf(stderr, "[graphics-dma-tag] tag=%08x lo=%016llx upper=%016llx next=%08x range=%zu:%zu tie=%u\n",
                                 currentTagAddr, (unsigned long long)tag, (unsigned long long)upper,
                                 tagAddr, appendBegin, chainBuf.size(), unsigned(tieEnabled));
+                        }
+                        // D_MADR follows the transfer: after a tag it points past that tag's data. Nocturne
+                        // finds the parameter block of its GS readback through D1_MADR once the chain stops.
+                        {
+                            const uint32_t dataAddr = (id == 0u || id == 3u || id == 4u)
+                                ? uint32_t(tag >> 32) & 0x7FFFFFF0u : currentTagAddr + 16u;
+                            m_ioRegisters[channelBase + 0x10] = dataAddr + uint32_t(tagQwc) * 16u;
+                        }
+                        {
+                            static const bool traceIrqTags = [] { const char* v = std::getenv("MAGATAMA_TRACE_IRQTAG"); return v && v[0] == '1'; }();
+                            static uint64_t irqTagLines = 0;
+                            if (traceIrqTags && irq && channelBase == 0x10009000u) rrv::gs::Control::afterFinishTrace() = true;
+                            if (traceIrqTags && irq && ++irqTagLines <= 400)
+                                std::fprintf(stderr, "[irq-tag] ch=%08x tag=%08x id=%u qwc=%u upper=%016llx tie=%u chcr=%08x next=%08x\n",
+                                    channelBase, currentTagAddr, id, unsigned(tagQwc), (unsigned long long)loadScalar<uint64_t>(tp, 8, 16, "dma chain tag", tagAddr),
+                                    unsigned(tieEnabled), chcr, tagAddr);
                         }
                         if (irq && tieEnabled)
                         {
@@ -3887,7 +3922,24 @@ int PS2Memory::pollDmaRegisters()
     return 0;
 }
 
+static uint32_t magatamaReadIORegisterTraced(uint32_t address, uint32_t value)
+{
+    if (rrv::gs::Control::afterFinishTrace() &&
+        (address == 0x10003C00u || address == 0x10003020u || address == 0x12001000u || address == 0x10009000u)) {
+        static uint32_t lastAddr = 0, lastValue = 0, repeats = 0; static int lines = 0;
+        if (address == lastAddr && value == lastValue) { ++repeats; return value; }
+        if (lines++ < 300) std::fprintf(stderr, "[after-finish] read %08x=%08x (previous repeated %u)\n", address, value, repeats);
+        lastAddr = address; lastValue = value; repeats = 0;
+    }
+    return value;
+}
+
 uint32_t PS2Memory::readIORegister(uint32_t address)
+{
+    return magatamaReadIORegisterTraced(address, readIORegisterUntraced(address));
+}
+
+uint32_t PS2Memory::readIORegisterUntraced(uint32_t address)
 {
     if (isGsPrivReg(address))
     {

@@ -31,6 +31,9 @@ def gif_header(text: str) -> str:
     { return m_controlStream && m_control->stalled(); }
     bool controlPending() const
     { return m_controlStream && (m_controlStream->pending() || !m_queue.empty()); }
+    // Bytes still to be consumed, as opposed to a path cursor parked in a tag without EOP.
+    bool controlQueued() const
+    { return m_controlStream && (m_controlStream->queued() || !m_queue.empty()); }
     bool controlPendingPath(int path) const
     {
         if (!m_controlStream) return false;

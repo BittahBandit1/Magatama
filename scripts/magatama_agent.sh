@@ -5,9 +5,11 @@
 #
 # It watches ~/magatama/jobs for a file named next.job. A job may only say three things:
 #   build=1                 rebuild first (scripts/magatama_build.sh)
-#   seconds=<5..120>        how long to let the game run before closing it (SIGTERM = a normal quit)
+#   seconds=<5..900>        how long to let the game run before closing it (SIGTERM = a normal quit)
 #   sample=<5..110>         also profile the game with macOS `sample` for 8 s starting this many seconds in
 #                           (written to ~/magatama/logs/sample-<id>.txt)
+#   replay=<name>           replay recorded input: ~/magatama/replays/<name>.workload (made by magatama_make_replay.py)
+#   capture=<fields>        save these output fields as images, e.g. 3000-3600/60 (to ~/magatama/captures/<id>/)
 #   env=<NAME>=<VALUE>      a debug switch; NAME must start with RRV_, MAGATAMA_ or MTL_, VALUE is
 #                           letters, digits and , : . _ - only
 # Nothing else in the file is accepted, so a job can never run an arbitrary command. Results go to
@@ -26,7 +28,12 @@ while true; do
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         if [[ "$line" == build=1 ]]; then build=1
-        elif [[ "$line" =~ '^seconds=([0-9]+)$' ]] && (( match[1] >= 5 && match[1] <= 120 )); then seconds=$match[1]
+        elif [[ "$line" =~ '^seconds=([0-9]+)$' ]] && (( match[1] >= 5 && match[1] <= 900 )); then seconds=$match[1]
+        elif [[ "$line" =~ '^replay=([A-Za-z0-9._-]+)$' && -f "$HOME/magatama/replays/$match[1].workload" ]]; then
+            envs+=("RRV_GATE3_BOUND_WORKLOAD=$HOME/magatama/replays/$match[1].workload" "RRV_GATE3_LIVE_PAD=0")
+        elif [[ "$line" =~ '^capture=([0-9,/-]+)$' ]]; then
+            mkdir -p "$HOME/magatama/captures/$id"
+            envs+=("RRV_GATE4_GS_CAPTURE_DIR=$HOME/magatama/captures/$id" "RRV_GATE4_GS_CAPTURE_FIELDS=$match[1]")
         elif [[ "$line" =~ '^sample=([0-9]+)$' ]] && (( match[1] >= 5 && match[1] <= 110 )); then sample_at=$match[1]
         elif [[ "$line" =~ '^env=((RRV_|MAGATAMA_|MTL_)[A-Z0-9_]+)=([A-Za-z0-9,:._-]*)$' ]]; then envs+=("$match[1]=$match[3]")
         else bad="$line"; break

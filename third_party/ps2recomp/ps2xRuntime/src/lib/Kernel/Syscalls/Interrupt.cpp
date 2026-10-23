@@ -396,6 +396,7 @@ bool gate3HasTemporalWake(R5900Context* ctx,PS2Runtime* runtime) {
         {
             return;
         }
+        if (rrv::gs::Control::afterFinishTrace()) { static int n = 0; if (n++ < 100) std::fprintf(stderr, "[after-finish] dmac cause=%u\n", cause); }
 
         // B3 (docs/TESTING.md §B3): the guest launches display-list chains from
         // the DMA-completion handler, so "how many chains get kicked" is

@@ -112,6 +112,10 @@ def runtime_cpp(t):
     part=t[start:end]
     part=replace_once(part,'            uint64_t csr = 0u;\n','            if (m_memory.gsControl().enabled()) return;\n            uint64_t csr = 0u;\n','GS suppress stale packet feedback')
     t=t[:start]+part+t[end:]
+    # The owner (worker/async) readback carries the bridge's CSR, which never sees FINISH or SIGNAL:
+    # with the producer control those bits live on the EE, so the readback must not overwrite them.
+    t=add(t,'void PS2Runtime::gate4StoreReadbackV1(uint64_t csr, uint64_t siglblid)\n{\n',
+          '    if (m_memory.gsControl().enabled()) return;\n','GS suppress stale owner readback')
     t=add(t,'                            const char *operation)\n    {\n',
           '        if (runtime.memory().gsControl().enabled()) return;\n','GS suppress stale field/HLE feedback')
     anchor='    m_memory.setGifArbiter(&m_gifArbiter);\n'
@@ -164,8 +168,18 @@ def runtime_cpp(t):
     // acknowledgement; retained producer work remains guest-visible until its
     // ordinary CSR/VIF control action resolves it.
     GuestExecutionScope guestExecution(this);
-    if (m_memory.gsControl().enabled() &&
-        !m_memory.gsResultBoundary().admits(rrv::gs::ResultOperation::ReadLocalMemory))
+    // Magatama: PATH3 packets held by MSKPATH3 have not reached the GS, so a readback taken now sees
+    // exactly what hardware would (Nocturne masks PATH3 around its local->host readback).
+    // A PATH2 cursor parked inside a tag without EOP (the readback packet itself) is not pending
+    // renderer work either; only queued bytes are.
+    if (m_memory.gsControl().enabled() && m_gifArbiter.controlQueued()) m_gifArbiter.drain();
+    uint32_t readBlockers = static_cast<uint32_t>(m_memory.gsResultBoundary().work) &
+        ~static_cast<uint32_t>(rrv::gs::ProducerWork::MaskedPath3);
+    if (!m_gifArbiter.controlQueued())
+        readBlockers &= ~static_cast<uint32_t>(rrv::gs::ProducerWork::RendererVisibleGif);
+    if (m_memory.gsControl().enabled() && readBlockers != 0u)
+        std::fprintf(stderr, "[gs-readback] blocked by producer work %#x\\n", readBlockers);
+    if (m_memory.gsControl().enabled() && readBlockers != 0u)
         throw std::runtime_error("GS control local-memory read blocked by non-quiescent guest producer work; cannot synchronously resolve guest acknowledgement");
 }
 

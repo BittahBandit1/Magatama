@@ -363,6 +363,14 @@ void rrvVif1UnpackDispatch(uint8_t *vu1Data, const uint8_t *srcBase, const uint8
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     rrv::gate4::OwnerScope gate4Owner(rrv::gate4::OwnerKind::Vif1Data, sizeBytes);
+    {
+        static const bool traceSmall = [] { const char* v = std::getenv("MAGATAMA_TRACE_IRQTAG"); return v && v[0] == '1'; }();
+        if (traceSmall && data && sizeBytes <= 128u) {
+            std::fprintf(stderr, "[vif1-data] size=%u vram=%u words:", sizeBytes, m_gsVRAM ? 1u : 0u);
+            for (uint32_t i = 0; i + 4 <= sizeBytes && i < 64u; i += 4) { uint32_t w; std::memcpy(&w, data + i, 4); std::fprintf(stderr, " %08x", w); }
+            std::fprintf(stderr, "\n");
+        }
+    }
     if (!data || !m_gsVRAM || sizeBytes == 0u)
         return;
 
@@ -705,6 +713,14 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (qwCount > 0)
             {
                 const bool directHl = (opcode == VIF_DIRECTHL);
+                {
+                    static const bool traceFinish = [] { const char* v = std::getenv("MAGATAMA_TRACE_IRQTAG"); return v && v[0] == '1'; }();
+                    if (traceFinish && qwCount == 2u) {
+                        uint64_t hi = 0; std::memcpy(&hi, data + pos + 24, 8);
+                        if (hi == 0x61u) std::fprintf(stderr, "[vif1-direct] FINISH packet submitted (masked3=%u pendingImg=%u)\n",
+                            unsigned(m_path3Masked), unsigned(m_vif1PendingPath2ImageQwc));
+                    }
+                }
                 submitGifPacket(GifPathId::Path2, data + pos, qwCount * 16, true, directHl);
                 rrvNoteVif1Path2(directHl ? "directhl" : "direct", data + pos,
                                  qwCount * 16u, imm, cmd, cmdPos, sizeBytes,

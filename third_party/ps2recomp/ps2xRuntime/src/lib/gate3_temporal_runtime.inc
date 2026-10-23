@@ -859,6 +859,9 @@ bool PS2Runtime::gate3MmioReadV1(uint32_t address,unsigned width,uint64_t& value
         gate4FenceV1();
         gate3PublishCsrV1();value=m_memory.gs().csr>>((physical-0x12001000u)*8);
         if(width<8)value&=(uint64_t(1)<<(width*8))-1;
+        if(rrv::gs::Control::afterFinishTrace()){static uint64_t last=~0ull,rep=0;static int lines=0;
+            if(value==last)++rep;else{if(lines++<100)std::fprintf(stderr,"[after-finish] csr-read=%llx gsctl-csr=%llx (previous repeated %llu)\n",
+                (unsigned long long)value,(unsigned long long)m_memory.gsControl().debugCsr(),(unsigned long long)rep);last=value;rep=0;}}
         if(auto& d=gate3DiagV1();d.trace){++d.reads;gate3MixV1(d.readHash,(uint64_t(physical)<<8)|width);
             gate3MixV1(d.readHash,value);gate3MixV1(d.readHash,gate3TemporalV1().now());}
         return true;

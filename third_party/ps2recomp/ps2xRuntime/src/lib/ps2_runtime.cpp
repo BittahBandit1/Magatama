@@ -917,6 +917,8 @@ PS2Runtime::~PS2Runtime()
 }
 
 extern std::function<void(uint32_t, bool, uint32_t)> g_magatamaVif0Mscal;
+thread_local R5900Context *g_magatamaIoCtx = nullptr;
+extern std::function<bool(uint8_t*, uint32_t)> g_magatamaVif1Readback;
 
 bool PS2Runtime::syncCoreSubsystems()
 {
@@ -976,14 +978,66 @@ bool PS2Runtime::syncCoreSubsystems()
                                     { dispatchGsPacket(pathId, data, size, vu1Pc, diagnostic); });
     m_memory.setGifArbiter(&m_gifArbiter);
     gate4ConfigureOwnerStreamV1();
+    // Magatama: GS local->host readback through the VIF1 FIFO. The transfer registers come from the GS control
+    // stream (the guest's BITBLTBUF/TRXPOS/TRXREG/TRXDIR=1); the pixels from the renderer's local memory, read in
+    // one piece on the first chunk and handed out in order to the following VIF1 DMAs.
+    g_magatamaVif1Readback = [this](uint8_t* dst, uint32_t bytes) -> bool
+    {
+        static std::vector<uint8_t> image;
+        static size_t offset = 0;
+        if (rrv::gs::Control::readbackArmed())
+        {
+            rrv::gs::Control::readbackArmed() = false;
+            const uint64_t* r = rrv::gs::Control::transferRegs();
+            const uint32_t w = uint32_t(r[2] & 0xFFF), h = uint32_t((r[2] >> 32) & 0xFFF);
+            const uint32_t psm = uint32_t((r[0] >> 24) & 0x3F);
+            const uint32_t bpp = psm == 0 ? 32 : psm == 1 ? 24 : (psm == 2 || psm == 0xA) ? 16 : psm == 0x13 ? 8 : psm == 0x14 ? 4 : 32;
+            image.assign((size_t(w) * h * bpp / 8 + 15) & ~size_t(15), 0);
+            offset = 0;
+            bool ok = !image.empty() && readActiveGsBackendLocalMemory(image.data(), uint32_t(image.size()), r[0], r[1], r[2]);
+            if (!ok) std::fill(image.begin(), image.end(), 0);
+            static int logged = 0;
+            if (logged++ < 8 || logged % 600 == 0) {
+                size_t nonzero = 0; uint32_t mn = ~0u, mx = 0;
+                for (size_t i = 0; i + 4 <= image.size(); i += 4) { uint32_t v; std::memcpy(&v, &image[i], 4); nonzero += v != 0; mn = std::min(mn, v); mx = std::max(mx, v); }
+                std::fprintf(stderr, "[gs-readback] %ux%u psm=%02x bbuf=%llx pos=%llx ok=%d nonzero=%zu min=%x max=%x\n", w, h, psm,
+                    (unsigned long long)r[0], (unsigned long long)r[1], ok, nonzero, mn, mx);
+            }
+        }
+        if (offset >= image.size()) { std::memset(dst, 0, bytes); return true; }
+        const size_t n = std::min<size_t>(bytes, image.size() - offset);
+        std::memcpy(dst, image.data() + offset, n);
+        if (n < bytes) std::memset(dst + n, 0, bytes - n);
+        offset += n;
+        return true;
+    };
     // Magatama: VIF0 MSCAL/MSCALF/MSCNT start VU0 in micro mode from a VIF0 stream (Nocturne's event scenes).
     g_magatamaVif0Mscal = [this](uint32_t startPC, bool resume, uint32_t itop)
                           {
+                              // VU0 micro mode and COP2 macro mode share one register file: a microprogram started
+                              // by VIF0 sees (and leaves) the VF/VI registers the EE set with QMTC2/CTC2.
                               const uint32_t pc = resume ? m_vu0.state().pc : startPC;
+                              R5900Context *ctx = g_magatamaIoCtx;
+                              if (ctx) vu0LoadStateV1(ctx);
                               vu0RunStateV1(pc, itop, 0u);
+                              if (ctx) vu0StoreStateV1(ctx, ctx->vu0_clip_flags);
                           };
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop, uint32_t top)
                                  {
+                                     // MAGATAMA_VU1_DUMP_AT=<start>: write VU1 code/data before each of the first 64
+                                     // MSCALs of that effective start (vu1-<n>-<pc>.data / .code in the cwd).
+                                     static const uint64_t dumpAt = [] { const char* v = std::getenv("MAGATAMA_VU1_DUMP_AT"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
+                                     if (dumpAt && m_gate3TemporalV1 && gate3TemporalV1().starts() == dumpAt) {
+                                         static int dumped = 0;
+                                         if (dumped < 64) {
+                                             char path[96];
+                                             std::snprintf(path, sizeof(path), "vu1-%02d-%04x.data", dumped, startPC);
+                                             if (FILE* f = std::fopen(path, "wb")) { std::fwrite(m_memory.getVU1Data(), 1, PS2_VU1_DATA_SIZE, f); std::fclose(f); }
+                                             if (dumped == 0) if (FILE* f = std::fopen("vu1.code", "wb")) { std::fwrite(m_memory.getVU1Code(), 1, PS2_VU1_CODE_SIZE, f); std::fclose(f); }
+                                             std::fprintf(stderr, "[vu1-dump] %d pc=%04x itop=%u top=%u\n", dumped, startPC, itop, top);
+                                             ++dumped;
+                                         }
+                                     }
                                      // RRV_VU1_LEAN: execute() with its per-call switches resolved once.
                                      if (!m_vu1.aotLean(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                         m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
@@ -2825,6 +2879,7 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
 {
+    g_magatamaIoCtx = ctx; // the guest context behind an I/O write (VIF0 MSCAL shares its VF registers)
     if (uint8_t *p = rrvSprFastV1(m_memory, vaddr, 4u))
     {
         std::memcpy(p, &value, sizeof(value));
@@ -2876,6 +2931,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value)
 {
+    g_magatamaIoCtx = ctx; // the guest context behind an I/O write (VIF0 MSCAL shares its VF registers)
     if (uint8_t *p = rrvSprFastV1(m_memory, vaddr, 8u))
     {
         std::memcpy(p, &value, sizeof(value));
@@ -2894,6 +2950,7 @@ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value)
 {
+    g_magatamaIoCtx = ctx; // the guest context behind an I/O write (VIF0 MSCAL shares its VF registers)
     if (uint8_t *p = rrvSprFastV1(m_memory, vaddr, 16u))
     {
         _mm_storeu_si128(reinterpret_cast<__m128i *>(p), value);
@@ -3406,8 +3463,10 @@ void PS2Runtime::gate4PublishOwnerV1()
 {
     auto &gs = m_memory.gs();
     if (m_ownerCsrValidV1)
+    {
         rrv::guest_time::QuietBump();
         gs.csr = (m_ownerCsrV1 & ~uint64_t(0x2008)) | (gs.csr & 0x2008);
+    }
     if (m_ownerSiglblidValidV1)
         gs.siglblid = m_ownerSiglblidV1;
 }

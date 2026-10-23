@@ -9,10 +9,11 @@ disc="${1:-$HOME/magatama/disc}"
 [[ -f "$disc/SLUS_209.11" ]] || { print -u2 "no SLUS_209.11 in $disc"; exit 1; }
 mkdir -p "$HOME/magatama/memcard" "$HOME/magatama/logs"
 log="$HOME/magatama/logs/run-$(date +%Y%m%d-%H%M%S).log"
-export RRV_GATE3_BOUND_WORKLOAD="$repo/config/magatama/bound-workload.txt"
+export RRV_GATE3_BOUND_WORKLOAD="${RRV_GATE3_BOUND_WORKLOAD:-$repo/config/magatama/bound-workload.txt}"
 export RRV_GATE3_MC_ROOT="$HOME/magatama/memcard"
 export RRV_GATE3_MC_PERSISTENT=1
-export RRV_GATE3_LIVE_PAD=1
+export RRV_GATE3_LIVE_PAD="${RRV_GATE3_LIVE_PAD:-1}"
+export RRV_GIF_PATH_LATENCY="${RRV_GIF_PATH_LATENCY:-0}"   # the RR5 hold keeps Nocturne's FINISH packet from the GS   # 0 for a replay (the workload carries the pad)
 export RRV_GATE3_REALTIME=1
 # Producer owns GS SIGNAL/FINISH/LABEL; the renderer does not generate these.
 export RRV_GS_CONTROL="${RRV_GS_CONTROL:-producer}"

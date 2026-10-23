@@ -13,6 +13,7 @@
 // Nocturne-specific fixes are added below as the boot log reveals them.
 
 #include "patches.h"
+#include "rrv_gs_trace_hooks.h"
 #include "nocturne_silent_sound.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_runtime.h"
@@ -401,7 +402,10 @@ std::string guestString(uint8_t* rdram, uint32_t addr) {
     std::string s;
     addr &= 0x1FFFFFFFu;
     if (!addr || addr >= 0x2000000u) return s;
-    for (uint32_t i = 0; i < 96 && addr + i < 0x2000000u && rdram[addr + i]; ++i) s.push_back(char(rdram[addr + i]));
+    for (uint32_t i = 0; i < 96 && addr + i < 0x2000000u && rdram[addr + i]; ++i) {
+        const uint8_t c = rdram[addr + i];   // never echo control bytes (BEL made Terminal beep) or binary data
+        s.push_back(c >= 0x20 && c < 0x7F ? char(c) : '.');
+    }
     return s;
 }
 uint32_t guest32(uint8_t* rdram, uint32_t addr) { uint32_t v = 0; std::memcpy(&v, rdram + (addr & 0x1FFFFFFFu), 4); return v; }
@@ -419,8 +423,14 @@ void ioTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
                          tap.name, a0, guest8(rdram, a0 + 0x14), guest8(rdram, a0 + 0x15), guest8(rdram, a0 + 0x16),
                          guest32(rdram, a0 + 0x38), uint32_t(guest32(rdram, GPR_U32(ctx, 28) - 0x2820u) & 0xFFFFu),
                          GPR_U32(ctx, 29), rrv::guest_time::context_id, guestString(rdram, guest32(rdram, a0 + 0x10)).c_str(), ra);
-        else if (tap.kind == 1) // a0 = path string
-            std::fprintf(stderr, "[io] %-10s path=\"%s\" a1=%x a2=%x ra=%08x\n", tap.name, guestString(rdram, a0).c_str(), a1, a2, ra);
+        else if (tap.kind == 1) { // a0 = path string
+            const std::string path = guestString(rdram, a0);
+            std::fprintf(stderr, "[io] %-10s path=\"%s\" a1=%x a2=%x ra=%08x\n", tap.name, path.c_str(), a1, a2, ra);
+            // MAGATAMA_GS_TRACE_ON=<text>: start an armed RRV_GS_TRACE capture when a file whose path contains <text>
+            // is opened (with RRV_GS_TRACE=<file> RRV_GS_TRACE_ARM=1 RRV_GS_TRACE_FRAMES=<n>).
+            if (const char* on = std::getenv("MAGATAMA_GS_TRACE_ON"); on && on[0] && path.find(on) != std::string::npos)
+                rrv::gstrace::trigger();
+        }
         else if (tap.kind == 4) // CreateThread(param): func +4, stack +8, size +0xC, priority +0x14
             std::fprintf(stderr, "[io] %-10s func=%08x prio=%u (caller ctx=%d) ra=%08x\n", tap.name, guest32(rdram, a0 + 4),
                          guest32(rdram, a0 + 0x14), rrv::guest_time::context_id, ra);

@@ -1500,6 +1500,19 @@ namespace ps2_stubs
         const bool interlacedFrameMode =
             (g_gparam.interlace & 0x1u) != 0u && (g_gparam.ffmode & 0x1u) != 0u;
         const uint32_t dispH = h * (interlacedFrameMode ? 2u : 1u) - 1u;
+        // libgraph's sceGsSetDefDispEnv takes dx/dy as SHORT offsets from the video mode's own display origin
+        // (Nocturne 0x2C8460: NTSC DX = 0x27C + dx*(MAGH+1), DY = 0x32 + dy interlaced / 0x19 + dy progressive;
+        // PAL 0x290 and 0x48 / 0x24). Passing the raw registers through (upper halves are garbage, dx came out
+        // as 0x2AA1CC) put the picture at DX=0x1CC DY=0: shifted up, with the bottom band empty.
+        {
+            const int32_t sdx = static_cast<int16_t>(dx & 0xFFFFu), sdy = static_cast<int16_t>(dy & 0xFFFFu);
+            const bool pal = g_gparam.omode == 3u;
+            const bool interlaced = (g_gparam.interlace & 0x1u) != 0u;
+            const int32_t baseX = pal ? 0x290 : 0x27C;
+            const int32_t baseY = pal ? (interlaced ? 0x48 : 0x24) : (interlaced ? 0x32 : 0x19);
+            dx = static_cast<uint32_t>(baseX + sdx * static_cast<int32_t>(magh + 1u)) & 0xFFFu;
+            dy = static_cast<uint32_t>(baseY + sdy) & 0x7FFu;
+        }
         const uint64_t display = makeDisplay(dx, dy, magh, 0u, dispW, dispH);
 
         const uint64_t smode2 =

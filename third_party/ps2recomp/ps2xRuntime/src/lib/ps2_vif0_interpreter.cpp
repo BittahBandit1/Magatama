@@ -1,3 +1,4 @@
+#include <functional>
 #include "runtime/ps2_memory.h"
 
 #include <algorithm>
@@ -9,6 +10,8 @@ namespace
 {
 std::atomic<uint32_t> s_vif0CommandCount{0u};
 }
+
+extern std::function<void(uint32_t, bool, uint32_t)> g_magatamaVif0Mscal;
 
 void PS2Memory::processVIF0Data(uint32_t srcPhys, uint32_t sizeBytes)
 {
@@ -83,6 +86,14 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
             std::memcpy(opcode == 0x30u ? vif0_regs.row : vif0_regs.col,
                         data + pos, 16u);
             pos += 16u;
+            continue;
+        }
+        if (opcode == 0x14u || opcode == 0x15u || opcode == 0x17u)
+        {
+            // MSCAL / MSCALF (start at IMM*8) and MSCNT (continue from the last stop). VIF0 transfers are
+            // synchronous here, so the microprogram simply runs to its end bit before the stream continues.
+            if (g_magatamaVif0Mscal)
+                g_magatamaVif0Mscal(static_cast<uint32_t>(imm) * 8u, opcode == 0x17u, vif0_regs.itop);
             continue;
         }
         if (opcode == 0x4au)

@@ -1681,7 +1681,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             }
 
             if (magatamaIpuEnabled() && (channelBase==0x1000B000u || channelBase==0x1000B400u)) {
-                if ((value & 0xcu)!=0) throw std::runtime_error("IPU chain DMA is not implemented");
+                if (channelBase==0x1000B000u && (value & 0xcu)!=0) throw std::runtime_error("from-IPU chain DMA is not implemented");
+                if (channelBase==0x1000B400u && (value & 0x100u)) rrv::ipu::chainEnded=false; // a new to-IPU transfer
                 serviceMagatamaIpu(m_ioRegisters,m_rdram,m_pendingDmacCompletionCauses);
                 completePendingTransfersV1(false,false,false);
                 return true;

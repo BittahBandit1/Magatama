@@ -26,7 +26,7 @@ export RRV_PCSX2_GS_FULL_SCALE="${RRV_PCSX2_GS_FULL_SCALE:-4}"
 # Decode movies through the software IPU instead of placeholder MMIO results.
 export MAGATAMA_IPU="${MAGATAMA_IPU:-1}"
 # macOS Metal performance HUD (the per-app toggle only applies to .app bundles; this is a bare executable).
-[[ "${MAGATAMA_METAL_HUD:-0}" == 1 ]] && export MTL_HUD_ENABLED=1
+[[ "${MAGATAMA_METAL_HUD:-1}" == 1 ]] && export MTL_HUD_ENABLED=1   # on by default; MAGATAMA_METAL_HUD=0 hides it
 print "== log: $log"
 # The runtime finds the PCSX2 GS bridge package only from the fixed layout B/bin/<program> (with the package in
 # B/.rrv-resource-packages), so run a copy placed in build/magatama/bin rather than candidate-bin itself.

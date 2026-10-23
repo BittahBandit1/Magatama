@@ -916,6 +916,8 @@ PS2Runtime::~PS2Runtime()
     }
 }
 
+extern std::function<void(uint32_t, bool, uint32_t)> g_magatamaVif0Mscal;
+
 bool PS2Runtime::syncCoreSubsystems()
 {
     uint8_t *const rdram = m_memory.getRDRAM();
@@ -974,6 +976,12 @@ bool PS2Runtime::syncCoreSubsystems()
                                     { dispatchGsPacket(pathId, data, size, vu1Pc, diagnostic); });
     m_memory.setGifArbiter(&m_gifArbiter);
     gate4ConfigureOwnerStreamV1();
+    // Magatama: VIF0 MSCAL/MSCALF/MSCNT start VU0 in micro mode from a VIF0 stream (Nocturne's event scenes).
+    g_magatamaVif0Mscal = [this](uint32_t startPC, bool resume, uint32_t itop)
+                          {
+                              const uint32_t pc = resume ? m_vu0.state().pc : startPC;
+                              vu0RunStateV1(pc, itop, 0u);
+                          };
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop, uint32_t top)
                                  {
                                      // RRV_VU1_LEAN: execute() with its per-call switches resolved once.
@@ -1506,6 +1514,8 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
     raiseCop0Exception(ctx, static_cast<uint32_t>(exception),
                        exception == EXCEPTION_TLB_REFILL);
 }
+
+std::function<void(uint32_t, bool, uint32_t)> g_magatamaVif0Mscal;
 
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {

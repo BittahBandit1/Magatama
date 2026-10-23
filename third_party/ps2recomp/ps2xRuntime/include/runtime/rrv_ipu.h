@@ -76,17 +76,42 @@ inline void finishDma(u32 base, unsigned cause) {
     (*bus)[base]&=~0x100u;
     completed.push_back(cause);
 }
+// Source-chain mode for the to-IPU channel (CHCR MOD=1): Nocturne feeds in-memory streams (event scenes) this way.
+inline bool chainEnded=false;
+inline bool chainNextTag() {
+    auto& chcr=(*bus)[0x1000b400]; auto& qwc=(*bus)[0x1000b420];
+    auto& madr=(*bus)[0x1000b410]; auto& tadr=(*bus)[0x1000b430];
+    if (chainEnded) return false;
+    u64 tag=0; for(unsigned i=0;i<8;++i) tag|=u64(ram[(tadr+i)&ramMask])<<(8*i);
+    qwc=u32(tag&0xffff);
+    const unsigned id=unsigned(tag>>28)&7; const u32 addr=u32(tag>>32)&0x7ffffff0u;
+    chcr=(chcr&0xffffu)|(u32(tag>>16)&0xffff0000u);
+    switch(id) {
+    case 0: madr=addr; chainEnded=true; break;            // refe
+    case 1: madr=tadr+16; tadr=madr+qwc*16; break;        // cnt
+    case 2: madr=tadr+16; tadr=addr; break;               // next
+    case 3: case 4: madr=addr; tadr+=16; break;           // ref, refs
+    default: madr=tadr+16; chainEnded=true; break;        // end (call/ret are not used by the IPU feeds)
+    }
+    if (((tag>>31)&1) && (chcr&0x80)) chainEnded=true;    // IRQ with TIE stops after this packet
+    return true;
+}
 inline void refill() {
     if (!bus || !ram || !((*bus)[0x1000b400]&0x100)) return;
     auto& qwc=(*bus)[0x1000b420];
     auto& madr=(*bus)[0x1000b410];
-    while(qwc && g_BP.IFC<8) {
+    const bool chain=(((*bus)[0x1000b400]>>2)&3)==1;
+    for(unsigned guard=0; g_BP.IFC<8 && guard<4096; ++guard) {
+        if(!qwc) {
+            if(chain && chainNextTag()) continue;
+            break;
+        }
         alignas(16) u32 words[4];
         for(unsigned i=0;i<16;++i) reinterpret_cast<u8*>(words)[i]=ram[(madr+i)&ramMask];
         ipu_fifo.in.write(words,1);
         madr+=16; --qwc; inputBytes+=16;
     }
-    if (!qwc) finishDma(0x1000b400,4);
+    if (!qwc && (!chain || chainEnded)) finishDma(0x1000b400,4);
 }
 inline void IPU_Fifo_Input::clear() {
     std::memset(data,0,sizeof(data)); readpos=writepos=0;

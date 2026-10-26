@@ -871,6 +871,8 @@ PS2Runtime::PS2Runtime()
     m_vu0.setIsVu0(true);
 
     std::memset(&m_cpuContext, 0, sizeof(m_cpuContext));
+    // Preserve VF0's architectural constant after this explicit reset too.
+    m_cpuContext.vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
 
     // R0 is always zero in MIPS
     m_cpuContext.r[0] = _mm_set1_epi32(0);
@@ -1018,16 +1020,29 @@ bool PS2Runtime::syncCoreSubsystems()
                               // by VIF0 sees (and leaves) the VF/VI registers the EE set with QMTC2/CTC2.
                               const uint32_t pc = resume ? m_vu0.state().pc : startPC;
                               R5900Context *ctx = g_magatamaIoCtx;
+                              // MAGATAMA_VU0_DUMP_AT=<start>: VU0 data/code and VF registers around the first 24 VIF0
+                              // microprogram runs from that start on (vu0-<n>-<pc>-{in,out}.data in the cwd).
+                              static const uint64_t dumpAt = [] { const char* v = std::getenv("MAGATAMA_VU0_DUMP_AT"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
+                              static int dumped = 0;
+                              const bool dump = dumpAt && m_gate3TemporalV1 && gate3TemporalV1().starts() >= dumpAt && dumped < 900;
+                              auto write = [&](const char* phase) {
+                                  char path[96];
+                                  std::snprintf(path, sizeof(path), "vu0dump/vu0-%03d-%04x-%s.data", dumped, pc, phase);
+                                  if (FILE* f = std::fopen(path, "wb")) { std::fwrite(m_memory.getVU0Data(), 1, PS2_VU0_DATA_SIZE, f);
+                                      if (ctx) std::fwrite(ctx->vu0_vf, 1, sizeof(ctx->vu0_vf), f); std::fclose(f); }
+                              };
+                              if (dump) { write("in"); if (dumped == 0) { if (FILE* f = std::fopen("vu0.code", "wb")) { std::fwrite(m_memory.getVU0Code(), 1, PS2_VU0_CODE_SIZE, f); std::fclose(f); } if (FILE* f = std::fopen("vu0dump/ram.bin", "wb")) { std::fwrite(m_memory.getRDRAM(), 1, 32u << 20, f); std::fwrite(m_memory.getScratchpad(), 1, 16384, f); std::fclose(f); } } }
                               if (ctx) vu0LoadStateV1(ctx);
                               vu0RunStateV1(pc, itop, 0u);
                               if (ctx) vu0StoreStateV1(ctx, ctx->vu0_clip_flags);
+                              if (dump) { write("out"); std::fprintf(stderr, "[vu0-dump] %d pc=%04x itop=%u ctx=%d\n", dumped, pc, itop, ctx ? 1 : 0); ++dumped; }
                           };
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop, uint32_t top)
                                  {
                                      // MAGATAMA_VU1_DUMP_AT=<start>: write VU1 code/data before each of the first 64
                                      // MSCALs of that effective start (vu1-<n>-<pc>.data / .code in the cwd).
                                      static const uint64_t dumpAt = [] { const char* v = std::getenv("MAGATAMA_VU1_DUMP_AT"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
-                                     if (dumpAt && m_gate3TemporalV1 && gate3TemporalV1().starts() == dumpAt) {
+                                     if (dumpAt && m_gate3TemporalV1 && gate3TemporalV1().starts() >= dumpAt) {
                                          static int dumped = 0;
                                          if (dumped < 64) {
                                              char path[96];
@@ -1045,11 +1060,35 @@ bool PS2Runtime::syncCoreSubsystems()
                                          m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                        m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                        m_gs, &m_memory, startPC, itop, 65536, top);
+                                     {   // MAGATAMA_VU1_REGLOG=<start>: vf26-29 and TOP after each VU1 run (first 60).
+                                         static const uint64_t at = [] { const char* v = std::getenv("MAGATAMA_VU1_REGLOG"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
+                                         static int n = 0;
+                                         if (at && m_gate3TemporalV1 && gate3TemporalV1().starts() >= at && n < 60) {
+                                             ++n; const auto& st = m_vu1.state();
+                                             std::fprintf(stderr, "[vu1-reg] pc=%04x itop=%u top=%u vi2=%d vf26=%g,%g,%g,%g vf29=%g,%g,%g,%g vf2=%g,%g,%g,%g\n", startPC, itop, top, st.vi[2],
+                                                 st.vf[26][0], st.vf[26][1], st.vf[26][2], st.vf[26][3], st.vf[29][0], st.vf[29][1], st.vf[29][2], st.vf[29][3],
+                                                 st.vf[2][0], st.vf[2][1], st.vf[2][2], st.vf[2][3]);
+                                         }
+                                     }
                                  });
     m_memory.setVu1MscntCallback([this](uint32_t itop, uint32_t top)
-                                 { m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                 {
+                                     static const uint64_t dumpAt = [] { const char* v = std::getenv("MAGATAMA_VU1_DUMP_AT"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
+                                     if (dumpAt && m_gate3TemporalV1 && gate3TemporalV1().starts() >= dumpAt) {
+                                         static int dumped = 0;
+                                         if (dumped < 16) {
+                                             char path[96];
+                                             std::snprintf(path, sizeof(path), "vu1-cnt-%02d-%04x.data", dumped, m_vu1.state().pc);
+                                             if (FILE* f = std::fopen(path, "wb")) { std::fwrite(m_memory.getVU1Data(), 1, PS2_VU1_DATA_SIZE, f); std::fclose(f); }
+                                             if (FILE* f = std::fopen("vu1.code", "wb")) { std::fwrite(m_memory.getVU1Code(), 1, PS2_VU1_CODE_SIZE, f); std::fclose(f); }
+                                             std::fprintf(stderr, "[vu1-dump] cnt %d pc=%04x itop=%u top=%u\n", dumped, m_vu1.state().pc, itop, top);
+                                             ++dumped;
+                                         }
+                                     }
+                                     m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                m_gs, &m_memory, itop, 65536, top); });
+                                                m_gs, &m_memory, itop, 65536, top);
+                                 });
     m_memory.setDmacCompletionCallback([this](uint32_t cause)
                                        { ps2_syscalls::dispatchDmacHandlersForCause(
                                              m_memory.getRDRAM(), this, cause); });
@@ -1802,10 +1841,10 @@ void PS2Runtime::vu0RunStateV1(uint32_t address, uint32_t itop, uint32_t top)
     // Entry 0 only ever worked because 0*8 == 0.
     if (!m_vu0.aotLean(m_memory.getVU0Code(), PS2_VU0_CODE_SIZE,
                        m_memory.getVU0Data(), PS2_VU0_DATA_SIZE,
-                       m_gs, &m_memory, address, itop, 4096u, top))
+                       m_gs, &m_memory, address, itop, 1u << 20, top))
         m_vu0.execute(m_memory.getVU0Code(), PS2_VU0_CODE_SIZE,
                       m_memory.getVU0Data(), PS2_VU0_DATA_SIZE,
-                      m_gs, &m_memory, address, itop, 4096u, top);
+                      m_gs, &m_memory, address, itop, 1u << 20, top);
 }
 
 void PS2Runtime::vu0StoreStateV1(R5900Context *ctx, uint32_t clipBefore)

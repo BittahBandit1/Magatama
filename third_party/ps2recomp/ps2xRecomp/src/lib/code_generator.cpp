@@ -2140,7 +2140,7 @@ namespace ps2recomp
         switch (subfunc)
         {
         case MMI1_PABSW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSW(GPR_VEC(ctx, {})));", rd, rs);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSW(GPR_VEC(ctx, {})));", rd, rt); // reads rt
         case MMI1_PCEQW:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PCEQW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PMINW:
@@ -2148,7 +2148,7 @@ namespace ps2recomp
         case MMI1_PADSBH:
             return translatePADSBH(inst);
         case MMI1_PABSH:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSH(GPR_VEC(ctx, {})));", rd, rs);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSH(GPR_VEC(ctx, {})));", rd, rt); // reads rt
         case MMI1_PCEQH:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PCEQH(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PMINH:
@@ -2997,17 +2997,16 @@ namespace ps2recomp
 
     std::string CodeGenerator::translatePEXEH(const Instruction &inst)
     {
-        // Swaps halfwords 1<->3 and 5<->7 within the 128-bit register
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shufflelo_epi16(_mm_shufflehi_epi16(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,3,0,1)), _MM_SHUFFLE(2,3,0,1)));",
-                           inst.rd, inst.rs);
+        // Exchanges halfwords 0<->2 and 4<->6
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXEH(GPR_VEC(ctx, {})));",
+                           inst.rd, inst.rt); // MMI permutes read rt
     }
 
     std::string CodeGenerator::translatePREVH(const Instruction &inst)
     {
-        // Reverses the order of the 8 halfwords
-        return fmt::format("{{ __m128i mask = _mm_setr_epi8(14,15, 12,13, 10,11, 8,9, 6,7, 4,5, 2,3, 0,1); "
-                           "SET_GPR_VEC(ctx, {}, PS2_SHUFFLE_EPI8(GPR_VEC(ctx, {}), mask)); }}",
-                           inst.rd, inst.rs);
+        // Reverses the halfwords within each doubleword
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PREVH(GPR_VEC(ctx, {})));",
+                           inst.rd, inst.rt); // MMI permutes read rt
     }
 
     std::string CodeGenerator::translatePMULTH(const Instruction &inst)
@@ -3053,14 +3052,14 @@ namespace ps2recomp
     std::string CodeGenerator::translatePEXEW(const Instruction &inst)
     {
         return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXEW(GPR_VEC(ctx, {})));",
-                           inst.rd, inst.rs);
+                           inst.rd, inst.rt); // MMI permutes read rt
     }
 
     std::string CodeGenerator::translatePROT3W(const Instruction &inst)
     {
-        // Rotates words left by 3: [d,c,b,a] -> [a,d,c,b]
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(0,3,2,1)));",
-                           inst.rd, inst.rs);
+        // Rotates the low three words: rd = {rt1, rt2, rt0, rt3}
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PROT3W(GPR_VEC(ctx, {})));",
+                           inst.rd, inst.rt); // MMI permutes read rt
     }
 
     std::string CodeGenerator::translatePMULTUW(const Instruction &inst)
@@ -3094,9 +3093,9 @@ namespace ps2recomp
 
     std::string CodeGenerator::translatePEXCH(const Instruction &inst)
     {
-        // Parallel Exchange Center Halfword (same as MMI2 PEXEH)
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shufflelo_epi16(_mm_shufflehi_epi16(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,3,0,1)), _MM_SHUFFLE(2,3,0,1)));",
-                           inst.rd, inst.rs);
+        // Parallel Exchange Center Halfword: halfwords 1<->2 and 5<->6
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXCH(GPR_VEC(ctx, {})));",
+                           inst.rd, inst.rt); // MMI permutes read rt
     }
 
     std::string CodeGenerator::translatePCPYH(const Instruction &inst)
@@ -3104,14 +3103,14 @@ namespace ps2recomp
         // Parallel Copy Halfword (Broadcast lower 16 bits of each 64-bit half)
         return fmt::format("{{ __m128i src = GPR_VEC(ctx, {}); uint16_t l = _mm_extract_epi16(src, 0); uint16_t h = _mm_extract_epi16(src, 4); \n"
                            "   SET_GPR_VEC(ctx, {}, _mm_set_epi16(h,h,h,h, l,l,l,l)); }}",
-                           inst.rs, inst.rd);
+                           inst.rt, inst.rd); // PCPYH reads rt
     }
 
     std::string CodeGenerator::translatePEXCW(const Instruction &inst)
     {
-        // Parallel Exchange Center Word (Swaps words 0<>2, 1<>3)
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(1,0,3,2)));",
-                           inst.rd, inst.rs);
+        // Parallel Exchange Center Word: words 1<->2
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXCW(GPR_VEC(ctx, {})));",
+                           inst.rd, inst.rt); // MMI permutes read rt
     }
 
     std::string CodeGenerator::translatePMTHI(const Instruction &inst)
@@ -3180,12 +3179,22 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VILWR(const Instruction &inst)
     {
-        return fmt::format("{{ uint32_t addr = (uint32_t)(ctx->vi[{}] << 2) & 0x3FFC; ctx->vi[{}] = static_cast<uint16_t>(READ32(addr)); }}", inst.rd, inst.rt); // VILWR.<f> vit, (vis)
+        // VILWR.f vit, (vis): one field of the VU0 data-memory quadword at vis (VU0 data is at 0x11004000).
+        const uint8_t f = inst.vectorInfo.vectorField;
+        const uint32_t off = (f & 0x8) ? 0u : (f & 0x4) ? 4u : (f & 0x2) ? 8u : 12u;
+        return fmt::format("{{ uint32_t addr = 0x11004000u + (((uint32_t)(ctx->vi[{}] & 0xFF)) << 4) + {}u; ctx->vi[{}] = static_cast<uint16_t>(READ32(addr)); }}", inst.rd, off, inst.rt);
     }
 
     std::string CodeGenerator::translateVU_VISWR(const Instruction &inst)
     {
-        return fmt::format("{{ uint32_t addr = (uint32_t)(ctx->vi[{}] << 2) & 0x3FFC; WRITE32(addr, (uint32_t)ctx->vi[{}]); }}", inst.rd, inst.rt); // VISWR.<f> vit, (vis)
+        // VISWR.f vit, (vis): vit (zero-extended) into each selected field of the VU0 data quadword at vis.
+        const uint8_t f = inst.vectorInfo.vectorField;
+        std::string body = fmt::format("{{ const uint32_t base = 0x11004000u + (((uint32_t)(ctx->vi[{}] & 0xFF)) << 4); const uint32_t v = (uint32_t)(uint16_t)ctx->vi[{}];", inst.rd, inst.rt);
+        if (f & 0x8) body += " WRITE32(base + 0u, v);";
+        if (f & 0x4) body += " WRITE32(base + 4u, v);";
+        if (f & 0x2) body += " WRITE32(base + 8u, v);";
+        if (f & 0x1) body += " WRITE32(base + 12u, v);";
+        return body + " }";
     }
 
     std::string CodeGenerator::translateVU_VIADD(const Instruction &inst)
@@ -3269,6 +3278,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMADD_Field(const Instruction &inst)
     {
+        // FMAC ops without the A suffix write only Fd; ACC is read, never written (PCSX2 VUops.cpp).
+        // Writing ACC here broke Nocturne's quaternion->matrix (0x2C0600): R11/R22 picked up -2z^2/-4z^2.
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
@@ -3282,7 +3293,7 @@ namespace ps2recomp
                            "__m128 res = PS2_VADD(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
-                           "ctx->vu0_acc = res; }}",
+                           "}}",
                            vfs, vft, vft, shuffle_pattern,
                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
@@ -3291,6 +3302,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMSUB_Field(const Instruction &inst)
     {
+        // FMAC ops without the A suffix write only Fd; ACC is read, never written (PCSX2 VUops.cpp).
+        // Writing ACC here broke Nocturne's quaternion->matrix (0x2C0600): R11/R22 picked up -2z^2/-4z^2.
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
@@ -3303,7 +3316,7 @@ namespace ps2recomp
                            "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
-                           "ctx->vu0_acc = res; }}",
+                           "}}",
                            vfs, vft, vft, shuffle_pattern,
                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
@@ -3350,6 +3363,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMADD(const Instruction &inst)
     {
+        // FMAC ops without the A suffix write only Fd; ACC is read, never written (PCSX2 VUops.cpp).
+        // Writing ACC here broke Nocturne's quaternion->matrix (0x2C0600): R11/R22 picked up -2z^2/-4z^2.
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
@@ -3358,7 +3373,7 @@ namespace ps2recomp
                            "__m128 res = PS2_VADD(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
-                           "ctx->vu0_acc = res; }}",
+                           "}}",
                            vfs, vft,
                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
@@ -3367,6 +3382,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMADDq(const Instruction &inst)
     {
+        // FMAC ops without the A suffix write only Fd; ACC is read, never written (PCSX2 VUops.cpp).
+        // Writing ACC here broke Nocturne's quaternion->matrix (0x2C0600): R11/R22 picked up -2z^2/-4z^2.
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -3374,7 +3391,7 @@ namespace ps2recomp
                            "__m128 res = PS2_VADD(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
-                           "ctx->vu0_acc = res; }}",
+                           "}}",
                            vfs,
                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
@@ -3383,6 +3400,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMADDi(const Instruction &inst)
     {
+        // FMAC ops without the A suffix write only Fd; ACC is read, never written (PCSX2 VUops.cpp).
+        // Writing ACC here broke Nocturne's quaternion->matrix (0x2C0600): R11/R22 picked up -2z^2/-4z^2.
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -3390,7 +3409,7 @@ namespace ps2recomp
                            "__m128 res = PS2_VADD(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
-                           "ctx->vu0_acc = res; }}",
+                           "}}",
                            vfs,
                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
@@ -3525,6 +3544,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMSUB(const Instruction &inst)
     {
+        // FMAC ops without the A suffix write only Fd; ACC is read, never written (PCSX2 VUops.cpp).
+        // Writing ACC here broke Nocturne's quaternion->matrix (0x2C0600): R11/R22 picked up -2z^2/-4z^2.
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
@@ -3533,7 +3554,7 @@ namespace ps2recomp
                            "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
-                           "ctx->vu0_acc = res; }}",
+                           "}}",
                            vfs, vft,
                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
@@ -3588,6 +3609,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMSUBq(const Instruction &inst)
     {
+        // FMAC ops without the A suffix write only Fd; ACC is read, never written (PCSX2 VUops.cpp).
+        // Writing ACC here broke Nocturne's quaternion->matrix (0x2C0600): R11/R22 picked up -2z^2/-4z^2.
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -3595,7 +3618,7 @@ namespace ps2recomp
                            "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
-                           "ctx->vu0_acc = res; }}",
+                           "}}",
                            vfs,
                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
@@ -3604,6 +3627,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMSUBi(const Instruction &inst)
     {
+        // FMAC ops without the A suffix write only Fd; ACC is read, never written (PCSX2 VUops.cpp).
+        // Writing ACC here broke Nocturne's quaternion->matrix (0x2C0600): R11/R22 picked up -2z^2/-4z^2.
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -3611,11 +3636,29 @@ namespace ps2recomp
                            "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
-                           "ctx->vu0_acc = res; }}",
+                           "}}",
                            vfs,
                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
                            vfd, vfd);
+    }
+
+
+    // ACC-writing VU0 macro ops (xxxA) only update the ACC lanes in their dest field.
+    static std::string accDestMask(const Instruction &inst, std::string code)
+    {
+        const uint8_t d = inst.vectorInfo.vectorField & 0xF;
+        if (d == 0xF)
+            return code;
+        const std::string key = "ctx->vu0_acc = ";
+        const size_t p = code.rfind(key);
+        if (p == std::string::npos)
+            return code;
+        const size_t e = code.find(';', p);
+        const std::string expr = code.substr(p + key.size(), e - (p + key.size()));
+        const std::string mask = fmt::format("_mm_castsi128_ps(_mm_set_epi32({}, {}, {}, {}))",
+                                             (d & 0x1) ? -1 : 0, (d & 0x2) ? -1 : 0, (d & 0x4) ? -1 : 0, (d & 0x8) ? -1 : 0);
+        return code.substr(0, p) + "ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, " + expr + ", " + mask + ")" + code.substr(e);
     }
 
     std::string CodeGenerator::translateVU_VADDA_Field(const Instruction &inst)
@@ -3625,9 +3668,9 @@ namespace ps2recomp
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
 
-        return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
+        return accDestMask(inst, fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
                            "ctx->vu0_acc = res; }}",
-                           vfs, vft, vft, shuffle_pattern);
+                           vfs, vft, vft, shuffle_pattern));
     }
 
     std::string CodeGenerator::translateVU_VSUBA_Field(const Instruction &inst)
@@ -3637,9 +3680,9 @@ namespace ps2recomp
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
 
-        return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
+        return accDestMask(inst, fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
                            "ctx->vu0_acc = res; }}",
-                           vfs, vft, vft, shuffle_pattern);
+                           vfs, vft, vft, shuffle_pattern));
     }
 
     std::string CodeGenerator::translateVU_VMADDA_Field(const Instruction &inst)
@@ -3702,116 +3745,116 @@ namespace ps2recomp
     {
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
-        return fmt::format("ctx->vu0_acc = PS2_VADD(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
-                           vfs, vft);
+        return accDestMask(inst, fmt::format("ctx->vu0_acc = PS2_VADD(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
+                           vfs, vft));
     }
 
     std::string CodeGenerator::translateVU_VADDAq(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
-        return fmt::format("ctx->vu0_acc = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));",
-                           vfs);
+        return accDestMask(inst, fmt::format("ctx->vu0_acc = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));",
+                           vfs));
     }
 
     std::string CodeGenerator::translateVU_VADDAi(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
-        return fmt::format("ctx->vu0_acc = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));",
-                           vfs);
+        return accDestMask(inst, fmt::format("ctx->vu0_acc = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));",
+                           vfs));
     }
 
     std::string CodeGenerator::translateVU_VSUBA(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
-        return fmt::format("ctx->vu0_acc = PS2_VSUB(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
-                           vfs, vft);
+        return accDestMask(inst, fmt::format("ctx->vu0_acc = PS2_VSUB(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
+                           vfs, vft));
     }
 
     std::string CodeGenerator::translateVU_VSUBAq(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
-        return fmt::format("ctx->vu0_acc = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));",
-                           vfs);
+        return accDestMask(inst, fmt::format("ctx->vu0_acc = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));",
+                           vfs));
     }
 
     std::string CodeGenerator::translateVU_VSUBAi(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
-        return fmt::format("ctx->vu0_acc = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));",
-                           vfs);
+        return accDestMask(inst, fmt::format("ctx->vu0_acc = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));",
+                           vfs));
     }
 
     std::string CodeGenerator::translateVU_VMADDA(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
-        return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
+        return accDestMask(inst, fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
                            "ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, mul_res); }}",
-                           vfs, vft);
+                           vfs, vft));
     }
 
     std::string CodeGenerator::translateVU_VMADDAq(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
-        return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
+        return accDestMask(inst, fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
                            "ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, mul_res); }}",
-                           vfs);
+                           vfs));
     }
 
     std::string CodeGenerator::translateVU_VMADDAi(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
-        return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+        return accDestMask(inst, fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
                            "ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, mul_res); }}",
-                           vfs);
+                           vfs));
     }
 
     std::string CodeGenerator::translateVU_VMSUBA(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
-        return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
+        return accDestMask(inst, fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
                            "ctx->vu0_acc = PS2_VSUB(ctx->vu0_acc, mul_res); }}",
-                           vfs, vft);
+                           vfs, vft));
     }
 
     std::string CodeGenerator::translateVU_VMSUBAq(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
-        return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
+        return accDestMask(inst, fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
                            "ctx->vu0_acc = PS2_VSUB(ctx->vu0_acc, mul_res); }}",
-                           vfs);
+                           vfs));
     }
 
     std::string CodeGenerator::translateVU_VMSUBAi(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
-        return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+        return accDestMask(inst, fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
                            "ctx->vu0_acc = PS2_VSUB(ctx->vu0_acc, mul_res); }}",
-                           vfs);
+                           vfs));
     }
 
     std::string CodeGenerator::translateVU_VMULA(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
-        return fmt::format("ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
-                           vfs, vft);
+        return accDestMask(inst, fmt::format("ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
+                           vfs, vft));
     }
 
     std::string CodeGenerator::translateVU_VMULAq(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
-        return fmt::format("ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));",
-                           vfs);
+        return accDestMask(inst, fmt::format("ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));",
+                           vfs));
     }
 
     std::string CodeGenerator::translateVU_VMULAi(const Instruction &inst)
     {
         uint8_t vfs = inst.rd;
-        return fmt::format("ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));",
-                           vfs);
+        return accDestMask(inst, fmt::format("ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));",
+                           vfs));
     }
 
     std::string CodeGenerator::translateVU_VOPMULA(const Instruction &inst)
@@ -3866,7 +3909,7 @@ namespace ps2recomp
     {
         uint8_t vis = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
-        return fmt::format("{{ uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
+        return fmt::format("{{ uint32_t addr = 0x11004000u + (((uint32_t)(ctx->vi[{}] & 0xFF)) << 4); "
                            "__m128 res = _mm_castsi128_ps(READ128(addr)); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
@@ -3882,7 +3925,7 @@ namespace ps2recomp
     {
         uint8_t vis = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
-        return fmt::format("{{ uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
+        return fmt::format("{{ uint32_t addr = 0x11004000u + (((uint32_t)(ctx->vi[{}] & 0xFF)) << 4); "
                            "__m128i old_val = READ128(addr); "
                            "__m128 res = _mm_blendv_ps(_mm_castsi128_ps(old_val), ctx->vu0_vf[{}], _mm_castsi128_ps(_mm_set_epi32({}, {}, {}, {}))); "
                            "WRITE128(addr, _mm_castps_si128(res)); "
@@ -3899,7 +3942,7 @@ namespace ps2recomp
         uint8_t vis = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ ctx->vi[{}] = (ctx->vi[{}] - 1) & 0x3FF; "
-                           "uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
+                           "uint32_t addr = 0x11004000u + (((uint32_t)(ctx->vi[{}] & 0xFF)) << 4); "
                            "__m128 res = _mm_castsi128_ps(READ128(addr)); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
@@ -3915,7 +3958,7 @@ namespace ps2recomp
         uint8_t vis = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ ctx->vi[{}] = (ctx->vi[{}] - 1) & 0x3FF; "
-                           "uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
+                           "uint32_t addr = 0x11004000u + (((uint32_t)(ctx->vi[{}] & 0xFF)) << 4); "
                            "__m128i old_val = READ128(addr); "
                            "__m128 res = _mm_blendv_ps(_mm_castsi128_ps(old_val), ctx->vu0_vf[{}], _mm_castsi128_ps(_mm_set_epi32({}, {}, {}, {}))); "
                            "WRITE128(addr, _mm_castps_si128(res)); }}",

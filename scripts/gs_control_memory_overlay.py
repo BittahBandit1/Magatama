@@ -86,10 +86,14 @@ def memory_cpp(text):
         lo = 'static_cast<uint64_t>(_mm_extract_epi64(value, 0))' if bits == 128 else 'value'
         insertion = ('\n    const uint32_t gsAddress = (address >= 0x80000000u && address < 0xc0000000u)\n'
                      '        ? (address & 0x1fffffffu) : address;\n'
+                     '    if (isGsPrivReg(gsAddress) && m_gsControl.enabled())\n'
+                     '        rrv::guest_time::QuietBump(); // Control writes return before legacy invalidation.\n'
                      f'    if (isGsPrivReg(gsAddress) && m_gsControl.write(gsAddress, {bits}u, {lo}))\n'
                      '        return;\n')
         text = add(text, anchor, insertion, f'GS write{bits} control')
     text = add(text, 'bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)\n{\n',
+               '    if (isGsPrivReg(address) && m_gsControl.enabled())\n'
+               '        rrv::guest_time::QuietBump();\n'
                '    if (isGsPrivReg(address) && m_gsControl.write(address, 32u, value))\n        return true;\n',
                'GS direct IO control')
     for bits, typ in ((8, 'uint8_t'), (16, 'uint16_t')):

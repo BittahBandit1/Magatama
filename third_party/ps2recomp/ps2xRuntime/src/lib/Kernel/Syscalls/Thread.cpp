@@ -763,6 +763,7 @@ namespace ps2_syscalls
     void SleepThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (rrv::gs::Control::afterFinishTrace()) { static int n = 0; if (n++ < 60) std::fprintf(stderr, "[after-finish] SleepThread a0=%u ra=%x\n", uint32_t(_mm_cvtsi128_si32(ctx->r[4])), uint32_t(_mm_cvtsi128_si32(ctx->r[31]))); }
+        if (getRegU32(ctx, 31) >= 0x2adb98u && getRegU32(ctx, 31) < 0x2ae000u) rrv::gs::Control::note('Z', getRegU32(ctx, 31), 0);
         auto info = ensureCurrentThreadInfo(ctx);
         throwIfTerminated(info);
         { std::lock_guard lock(info->m);
@@ -803,6 +804,7 @@ namespace ps2_syscalls
     void iWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (rrv::gs::Control::afterFinishTrace()) { static int n = 0; if (n++ < 60) std::fprintf(stderr, "[after-finish] iWakeupThread a0=%u ra=%x\n", uint32_t(_mm_cvtsi128_si32(ctx->r[4])), uint32_t(_mm_cvtsi128_si32(ctx->r[31]))); }
+        if (getRegU32(ctx, 4) == 3u) rrv::gs::Control::note('K', getRegU32(ctx, 4), getRegU32(ctx, 31));
         wakeupThreadImpl(ctx, runtime, true);
     }
 

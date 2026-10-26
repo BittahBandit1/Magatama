@@ -811,6 +811,21 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
+            {   // MAGATAMA_TRACE_UNPACK=<lo>:<hi> (qword range in VU1 data): log UNPACKs that write into it.
+                static const std::pair<uint32_t, uint32_t> range = [] {
+                    const char* v = std::getenv("MAGATAMA_TRACE_UNPACK"); if (!v) return std::pair<uint32_t, uint32_t>{1u, 0u};
+                    char* e = nullptr; const uint32_t lo = std::strtoul(v, &e, 0); const uint32_t hi = (e && *e == ':') ? std::strtoul(e + 1, nullptr, 0) : lo;
+                    return std::pair<uint32_t, uint32_t>{lo, hi}; }();
+                static int lines = 0;
+                if (range.first <= range.second && vuAddr <= range.second && vuAddr + writeVectorCount > range.first && lines < 400) {
+                    ++lines;
+                    uint32_t w[8] = {};
+                    std::memcpy(w, data + pos, std::min<uint32_t>(32u, sizeBytes - pos));
+                    std::fprintf(stderr, "[unpack] op=%02x imm=%04x num=%u addr=%u cl=%u wl=%u mode=%u mask=%08x row=%08x,%08x,%08x,%08x bytes=%u data=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+                        opcode, imm, writeVectorCount, vuAddr, cl, wl, vif1_regs.mode, vif1_regs.mask,
+                        vif1_regs.row[0], vif1_regs.row[1], vif1_regs.row[2], vif1_regs.row[3], totalBytes, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+                }
+            }
             if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;

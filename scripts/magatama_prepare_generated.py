@@ -5,13 +5,13 @@
 
   generated/nocturne/output                         -> link to the recompiler output (read-only game code)
   generated/nocturne/legacy-stubs/ps2_recompiled_stubs.h  copy of the generation's stub header
-  generated/nocturne/vu/, native/                   empty: no ahead-of-time VU code or native hot functions
-                                                    yet, so the runtime interprets VU microcode
+  generated/nocturne/vu/                           private ahead-of-time VU catalogue extracted from the ELF
+  generated/nocturne/native/                       reserved for native hot functions
   generated/nocturne/source-manifest.json           the ELF identity the product checks at launch
 
 generated/ is ignored by git. Re-run after every regeneration.
 """
-import argparse, hashlib, json, os, shutil
+import argparse, hashlib, json, os, shutil, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,4 +49,6 @@ manifest = {"schema": "magatama-generated-v1", "game": "Shin Megami Tensei: Noct
             "game_input": {"name": "SLUS_209.11", "sha256": h, "size": elf.stat().st_size},
             "generated": {"path": args.generated, "file_count": len(files)}}
 (dst / "source-manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
+subprocess.run([sys.executable, str(ROOT / "tools/vu-aot/vu_aot_gen.py"),
+                "--elf", str(elf), "--output", str(dst / "vu")], check=True)
 print(f"generated/nocturne ready: {len(files)} files, ELF sha256 {h[:16]}...")

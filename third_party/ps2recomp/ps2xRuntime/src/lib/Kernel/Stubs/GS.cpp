@@ -1499,7 +1499,8 @@ namespace ps2_stubs
         // the exact inverse of decodeDisplaySize()'s FFMD halving.
         const bool interlacedFrameMode =
             (g_gparam.interlace & 0x1u) != 0u && (g_gparam.ffmode & 0x1u) != 0u;
-        const uint32_t dispH = h * (interlacedFrameMode ? 2u : 1u) - 1u;
+        // A full-height (448-line) buffer is already the whole frame; only a field-height buffer is doubled.
+        const uint32_t dispH = h * ((interlacedFrameMode && h <= 256u) ? 2u : 1u) - 1u;
         // libgraph's sceGsSetDefDispEnv takes dx/dy as SHORT offsets from the video mode's own display origin
         // (Nocturne 0x2C8460: NTSC DX = 0x27C + dx*(MAGH+1), DY = 0x32 + dy interlaced / 0x19 + dy progressive;
         // PAL 0x290 and 0x48 / 0x24). Passing the raw registers through (upper halves are garbage, dx came out
@@ -1518,12 +1519,12 @@ namespace ps2_stubs
         const uint64_t smode2 =
             (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
             (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
-        // PMODE is deliberately carried over from the live register rather than
-        // synthesised: sceGsResetGraph already programmed the circuit selection
-        // this title wants, and re-deciding it here would be a presentation
-        // change with no measurement behind it. The point of writing it at all
-        // is to stop sceGsPutDispEnv applying a zero (no CRTC enabled).
-        const uint64_t pmode = runtime ? runtime->memory().gs().pmode : 0ull;
+        // PMODE is what libgraph's own sceGsSetDefDispEnv stores: 0x66 = read circuit 2 only (EN2), CRTMD=1,
+        // MMOD=1, AMOD=1, ALP=0 (Nocturne 0x2C850C: addiu v1,zero,102; sd v1,0(env)). Carrying over the
+        // ResetGraph stub's EN1 + MMOD=0 instead made the merge circuit multiply every pixel by the frame
+        // buffer's own alpha, so the 3D scene came out ~25% dark and the dialogue band's low-alpha top edge
+        // turned into a hard black stripe above the text (the game draws with dest alpha it never displays).
+        const uint64_t pmode = 0x66ull;
 
         writeGsDispEnvFull(rdram, envAddr, pmode, smode2, dispfb, display);
         setReturnS32(ctx, 0);

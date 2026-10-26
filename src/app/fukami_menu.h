@@ -71,6 +71,8 @@ public:
     // Requests from the menu. -1: none, 0: leave fullscreen, 1: enter it.
     int takeFullscreenRequest() { return m_fullscreenRequest.exchange(-1); }
     bool takeQuitRequest() { return m_quitRequest.exchange(false); }
+    // -1: none, 0: hide the Metal HUD, 1: show it.
+    int takeMetalHudRequest() { return m_metalHudRequest.exchange(-1); }
     bool takeRestartRequest() { return m_restartRequest.exchange(false); }
 
     // ---- GS owner thread (bridge overlay callback) -------------------------
@@ -99,6 +101,7 @@ private:
     std::atomic<bool> m_fullscreen{false};
     std::atomic<int> m_fullscreenRequest{-1};
     std::atomic<bool> m_quitRequest{false};
+    std::atomic<int> m_metalHudRequest{-1};
     std::atomic<bool> m_restartRequest{false};
 
     std::mutex m_inputMutex;
@@ -109,6 +112,8 @@ private:
 
     // GS owner thread only.
     bool m_wasOpen = false;
+    bool m_confirmQuit = false;     // "Are you sure?" page shown instead of the menu
+    bool m_pageAppearing = false;   // a page (menu or confirmation) is drawn for the first time
     std::map<std::string, std::string> m_values; // "section.key" -> shown value
 };
 

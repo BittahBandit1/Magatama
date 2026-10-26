@@ -32,6 +32,8 @@ def gif_header(text: str) -> str:
     bool controlPending() const
     { return m_controlStream && (m_controlStream->pending() || !m_queue.empty()); }
     // Bytes still to be consumed, as opposed to a path cursor parked in a tag without EOP.
+    const rrv::gs::Stream::Cursor* controlCursor() const
+    { return m_controlStream ? &m_controlStream->cursor() : nullptr; }
     bool controlQueued() const
     { return m_controlStream && (m_controlStream->queued() || !m_queue.empty()); }
     bool controlPendingPath(int path) const
@@ -54,6 +56,22 @@ def gif_header(text: str) -> str:
 
 
 def gif_cpp(text: str) -> str:
+    text = '#include "rrv_guest_scheduler.h"\n' + text
+    text = _once(text, 'void GifArbiter::drain()\n{\n', '''void GifArbiter::drain()
+{
+    // Control consumes SIGNAL/FINISH on the producer, including masked IRQs
+    // which do not otherwise notify the scheduler. No sink executes guest
+    // callbacks. Retire a cached checkpoint window before returning, even if
+    // a sink throws after a control event has already committed.
+    struct ControlQuietScope {
+        rrv::gs::Control* control;
+        uint64_t csr;
+        ~ControlQuietScope() {
+            if (control && control->debugCsr() != csr)
+                rrv::guest_time::QuietBump();
+        }
+    } quiet{m_control, m_control ? m_control->debugCsr() : 0};
+''')
     text = _once(text, """    if (!data || sizeBytes < 16 || !m_processFn)
         return;""", """    if (!data || sizeBytes < 16 || !m_processFn)
         return;

@@ -109,6 +109,15 @@ int gate3TemporalWait(uint8_t*,R5900Context* ctx,PS2Runtime* runtime,std::functi
     }
     return KE_OK;
 }
+int gate3TemporalWaitForStart(uint8_t*,R5900Context* ctx,PS2Runtime* runtime,uint64_t start) {
+    while(runtime->gate3TemporalV1().starts()<start) {
+        auto ticket=gate3Wait(ctx,runtime,6,0);
+        runtime->gate3AddStartWaitV1(ticket,start);
+        gate3Park(ticket,runtime);
+        if(ticket->result!=KE_OK)return ticket->result;
+    }
+    return KE_OK;
+}
 void gate3SyncV(uint8_t* rdram,R5900Context* ctx,PS2Runtime* runtime) {
     runtime->gate3DiagSyncVV1(ctx,true);
     const uint32_t gp=getRegU32(ctx,28);
@@ -397,6 +406,7 @@ bool gate3HasTemporalWake(R5900Context* ctx,PS2Runtime* runtime) {
             return;
         }
         if (rrv::gs::Control::afterFinishTrace()) { static int n = 0; if (n++ < 100) std::fprintf(stderr, "[after-finish] dmac cause=%u\n", cause); }
+        if (cause == 1u) rrv::gs::Control::note('I', cause, 0);
 
         // B3 (docs/TESTING.md §B3): the guest launches display-list chains from
         // the DMA-completion handler, so "how many chains get kicked" is

@@ -104,7 +104,7 @@ bool appliesLive(std::string_view section, std::string_view key)
     // fullscreen: the host toggles the window. The others are presentation
     // options the bridge changes between two fields (RrvPcsx2GsBridgeUi set_*).
     return (section == "display" && (key == "fullscreen" || key == "aspect" || key == "integer_scaling")) ||
-           (section == "rendering" && (key == "fxaa" || key == "cas"));
+           (section == "rendering" && (key == "fxaa" || key == "cas" || key == "metal_hud"));
 }
 
 Menu::Menu(std::filesystem::path ini, const std::filesystem::path &defaults) :
@@ -118,6 +118,11 @@ Menu::Menu(std::filesystem::path ini, const std::filesystem::path &defaults) :
     const settings::IniDocument shown = settings::withDefaults(doc ? *doc : settings::IniDocument{}, m_defaults);
     for (const settings::Spec &spec : settings::schema())
         m_launch[id(spec.section, spec.key)] = settings::value(shown, spec);
+    // The Metal HUD is on at launch exactly when the process was started with it (MTL_HUD_ENABLED=1).
+    {
+        const char *hud = std::getenv("MTL_HUD_ENABLED");
+        m_launch[id("rendering", "metal_hud")] = (hud && hud[0] == '1') ? "true" : "false";
+    }
     m_values = m_launch;
     // The picture fit that an empty `aspect` stands for is the ratio this
     // process was launched with (run_gate4_product.sh: aspect defaults to it;
@@ -237,6 +242,13 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
         // else the menu.
         if (isBackKey(input) && !ui.consumes_cancel())
         {
+            if (m_confirmQuit)
+            {
+                // Back out of the quit confirmation to the menu, not out of the menu.
+                m_confirmQuit = false;
+                m_pageAppearing = true;
+                continue;
+            }
             close();
             break;
         }
@@ -251,20 +263,52 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
     if (!isOpen())
     {
         m_wasOpen = false;
+        m_confirmQuit = false;
         ui.clear_input();
         return;
     }
+    if (appearing)
+        m_confirmQuit = false;
 
-    if (ui.begin_menu("Magatama", appearing ? 1 : 0))
+    if (m_confirmQuit)
+    {
+        // Quit confirmation: No on the left (focused), Yes on the right.
+        const bool first = m_pageAppearing;
+        m_pageAppearing = false;
+        if (ui.begin_menu("Quit", first ? 1 : 0))
+        {
+            ui.text_wrapped("Are you sure? Unsaved progress will be lost.");
+            ui.spacing();
+            if (ui.button("No"))
+            {
+                m_confirmQuit = false;
+                m_pageAppearing = true;
+            }
+            if (first)
+                ui.default_focus();
+            ui.same_line();
+            if (ui.button("Yes"))
+                m_quitRequest.store(true);
+        }
+        ui.end_menu();
+        return;
+    }
+    const bool menuAppearing = appearing || m_pageAppearing;
+    m_pageAppearing = false;
+
+    if (ui.begin_menu("Magatama", menuAppearing ? 1 : 0))
     {
         if (ui.button("Resume"))
             close();
-        if (appearing)
+        if (menuAppearing)
             ui.default_focus();
         ui.tooltip("Back to the game (Esc, F1 or the controller's Home button).");
         ui.same_line();
         if (ui.button("Quit"))
-            m_quitRequest.store(true);
+        {
+            m_confirmQuit = true;
+            m_pageAppearing = true;
+        }
         ui.tooltip("Quit the game. Your save card is kept.");
 
         std::vector<std::string> pending;
@@ -437,6 +481,8 @@ void Menu::applyLive(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, c
         ui.set_fxaa(settings::boolValue(value) ? 1 : 0);
     else if (spec.section == "rendering" && spec.key == "cas")
         ui.set_cas(static_cast<int>(std::clamp<long>(toLong(value, 0), 0, 100)));
+    else if (spec.section == "rendering" && spec.key == "metal_hud")
+        m_metalHudRequest.store(settings::boolValue(value) ? 1 : 0); // the host sets it on the window's layer
 }
 
 bool Menu::pendingRestart(const settings::Spec &spec) const

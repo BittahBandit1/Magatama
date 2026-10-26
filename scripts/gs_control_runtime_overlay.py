@@ -149,6 +149,7 @@ def runtime_cpp(t):
         // The existing tick/field index remains authoritative. With reverse
         // readback removed, mirror only FIELD directly, never acknowledge CSR.
         constexpr uint64_t fieldBit = 1ull << 13;
+        rrv::guest_time::QuietBump(); // FIELD is also a cached checkpoint input.
         m_memory.gs().csr = (m_memory.gs().csr & ~fieldBit) | ((fieldIndex & 1u) ? fieldBit : 0u);
     }
     m_memory.pumpGsControlIrq();
@@ -172,7 +173,7 @@ def runtime_cpp(t):
     // exactly what hardware would (Nocturne masks PATH3 around its local->host readback).
     // A PATH2 cursor parked inside a tag without EOP (the readback packet itself) is not pending
     // renderer work either; only queued bytes are.
-    if (m_memory.gsControl().enabled() && m_gifArbiter.controlQueued()) m_gifArbiter.drain();
+    if (m_memory.gsControl().enabled()) gate4FenceV1(); // let the owner finish its GIF work; never drain from here
     uint32_t readBlockers = static_cast<uint32_t>(m_memory.gsResultBoundary().work) &
         ~static_cast<uint32_t>(rrv::gs::ProducerWork::MaskedPath3);
     if (!m_gifArbiter.controlQueued())

@@ -130,6 +130,11 @@ target_link_libraries(rrv-m1-present-replay PRIVATE
 target_compile_features(rrv-m1-present-replay PRIVATE cxx_std_20)
 
 if(BUILD_TESTING)
+    add_executable(rrv-keyboard-pad-tests "${CMAKE_SOURCE_DIR}/tests/keyboard_pad_tests.cpp")
+    target_include_directories(rrv-keyboard-pad-tests PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/host" "${RRV_RUNTIME_BUILD_SOURCE_DIR}/include")
+    target_link_libraries(rrv-keyboard-pad-tests PRIVATE SDL2::SDL2)
+    add_test(NAME rrv-keyboard-pad COMMAND rrv-keyboard-pad-tests)
     add_executable(rrv-sdl-audio-tests
         "${CMAKE_SOURCE_DIR}/tests/sdl_audio_tests.cpp"
         "${CMAKE_SOURCE_DIR}/src/host/rrv_sdl_audio.cpp")

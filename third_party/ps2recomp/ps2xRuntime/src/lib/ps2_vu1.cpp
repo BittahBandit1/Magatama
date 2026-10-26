@@ -3831,6 +3831,30 @@ RRV_SIMD_INLINE void VU1Interpreter::execLowerT(uint32_t instr, uint8_t *vuData,
                 }
             }
 
+            {   // MAGATAMA_VU1_COLLAPSE_DUMP=1: the first few packets whose XYZ all sit at (2048,2048) dump VU1 state.
+                static const long collapseAfter = [] { const char* v = std::getenv("MAGATAMA_VU1_COLLAPSE_DUMP"); return v ? std::strtol(v, nullptr, 10) : -1L; }();
+                static const auto collapseT0 = std::chrono::steady_clock::now();
+                static int dumps = 0;
+                const bool collapseDump = collapseAfter >= 0 &&
+                    std::chrono::steady_clock::now() - collapseT0 >= std::chrono::seconds(collapseAfter);
+                if (collapseDump && dumps < 3 && addr + totalBytes <= dataSize && totalBytes >= 16u * 12u) {
+                    uint32_t centre = 0, xyz = 0;
+                    for (uint32_t o = 16; o + 16 <= totalBytes; o += 16) {
+                        uint64_t lo; std::memcpy(&lo, vuData + addr + o, 8);
+                        if ((lo & 0xffffu) == 0x8000u && ((lo >> 32) & 0xffffu) == 0x8000u) ++centre;
+                    }
+                    (void)xyz;
+                    if (centre >= 8) {
+                        char path[64]; std::snprintf(path, sizeof(path), "collapse-%d.data", dumps);
+                        if (FILE* f = std::fopen(path, "wb")) { std::fwrite(vuData, 1, dataSize, f); std::fclose(f); }
+                        std::fprintf(stderr, "[collapse] #%d entry=%04x kickpc=%04x addr=%u bytes=%u centre=%u vi:", dumps, m_entryPC, m_state.pc, addr / 16u, totalBytes, centre);
+                        for (int r = 0; r < 16; ++r) std::fprintf(stderr, " %d", m_state.vi[r]);
+                        std::fprintf(stderr, "\n");
+                        for (int r = 1; r < 32; ++r) std::fprintf(stderr, "[collapse] vf%02d %g %g %g %g\n", r, m_state.vf[r][0], m_state.vf[r][1], m_state.vf[r][2], m_state.vf[r][3]);
+                        ++dumps;
+                    }
+                }
+            }
             if (addr + totalBytes <= dataSize)
             {
                 if (memory)

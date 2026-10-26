@@ -2,6 +2,26 @@
 #include "rrv_cursor_idle.h"
 #include "rrv_display_refresh.h"
 #include "rrv_pad_slots.h"
+#include "rrv_keyboard_pad.h"
+
+// Provided by the PS2 runtime's real-time pacer; weak so presentation-only test tools still link.
+#if defined(_MSC_VER)
+extern "C" void rrv_set_fast_forward(int on);
+extern "C" int rrv_fast_forward_active(void);
+#define RRV_FAST_FORWARD_AVAILABLE true
+extern "C" void rrv_free_camera_set(int on);
+extern "C" int rrv_free_camera_active(void);
+extern "C" void rrv_free_camera_stick(float x, float y);
+#define RRV_FREE_CAMERA_AVAILABLE true
+#else
+extern "C" __attribute__((weak)) void rrv_set_fast_forward(int on);
+extern "C" __attribute__((weak)) int rrv_fast_forward_active(void);
+#define RRV_FAST_FORWARD_AVAILABLE (rrv_set_fast_forward != nullptr && rrv_fast_forward_active != nullptr)
+extern "C" __attribute__((weak)) void rrv_free_camera_set(int on);
+extern "C" __attribute__((weak)) int rrv_free_camera_active(void);
+extern "C" __attribute__((weak)) void rrv_free_camera_stick(float x, float y);
+#define RRV_FREE_CAMERA_AVAILABLE (rrv_free_camera_set != nullptr && rrv_free_camera_active != nullptr && rrv_free_camera_stick != nullptr)
+#endif
 
 #if defined(RRV_M2P_PAD_OBSERVER)
 #include "rrv_m2p_pad_observer.h"
@@ -15,6 +35,7 @@
 #include <SDL.h>
 #if defined(__APPLE__)
 #include <SDL_metal.h>
+#include <time.h>
 #endif
 #include <SDL_syswm.h>
 #if defined(__linux__)
@@ -132,7 +153,9 @@ bool isPadKeyboardScancode(SDL_Scancode scancode)
     case SDL_SCANCODE_DOWN: case SDL_SCANCODE_S:
     case SDL_SCANCODE_LEFT: case SDL_SCANCODE_A:
     case SDL_SCANCODE_RIGHT: case SDL_SCANCODE_D:
-    case SDL_SCANCODE_RETURN: case SDL_SCANCODE_SPACE:
+    case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: case SDL_SCANCODE_SPACE:
+    case SDL_SCANCODE_I: case SDL_SCANCODE_J: case SDL_SCANCODE_K: case SDL_SCANCODE_L:
+    case SDL_SCANCODE_1: case SDL_SCANCODE_3:
     // Esc/F1 open the in-game menu (the pad then reads neutral); Circle moved
     // to Backspace/C (Esc too while no menu is available).
     case SDL_SCANCODE_ESCAPE: case SDL_SCANCODE_F1:
@@ -398,56 +421,85 @@ public:
 #endif
             return;
         }
-        const auto held = [&](SDL_Scancode code) { return keys[code] != 0; };
-        const auto set = [&](HostPadButton button, SDL_Scancode code) {
-            if (held(code))
-                m_keyboardButtons |= static_cast<uint32_t>(button);
-        };
-        if (held(SDL_SCANCODE_UP) || held(SDL_SCANCODE_W)) m_keyboardButtons |= HostPadButtonUp;
-        if (held(SDL_SCANCODE_DOWN) || held(SDL_SCANCODE_S)) m_keyboardButtons |= HostPadButtonDown;
-        if (held(SDL_SCANCODE_LEFT) || held(SDL_SCANCODE_A)) m_keyboardButtons |= HostPadButtonLeft;
-        if (held(SDL_SCANCODE_RIGHT) || held(SDL_SCANCODE_D)) m_keyboardButtons |= HostPadButtonRight;
-        set(HostPadButtonCross, SDL_SCANCODE_SPACE);
-        // Esc and F1 open the in-game menu; Circle is Backspace or C (and Esc
-        // only while no menu is available, e.g. a bridge without the overlay).
-        if (held(SDL_SCANCODE_BACKSPACE) || held(SDL_SCANCODE_C) ||
-            (held(SDL_SCANCODE_ESCAPE) && !(m_menu && m_menu->available())))
-            m_keyboardButtons |= HostPadButtonCircle;
-        if (held(SDL_SCANCODE_KP_0) || held(SDL_SCANCODE_Z)) m_keyboardButtons |= HostPadButtonSquare;
-        if (held(SDL_SCANCODE_KP_1) || held(SDL_SCANCODE_X)) m_keyboardButtons |= HostPadButtonTriangle;
-        set(HostPadButtonL1, SDL_SCANCODE_Q);
-        set(HostPadButtonR1, SDL_SCANCODE_E);
-        set(HostPadButtonL2, SDL_SCANCODE_LSHIFT);
-        set(HostPadButtonR2, SDL_SCANCODE_RSHIFT);
-        set(HostPadButtonStart, SDL_SCANCODE_RETURN);
-        set(HostPadButtonSelect, SDL_SCANCODE_TAB);
+        // Read mouse state on the SDL owner thread with the keyboard. Only
+        // clicks in the focused game window belong to the fallback pad.
+        const bool leftMouseDown = SDL_GetKeyboardFocus() == m_window &&
+                                   SDL_GetMouseFocus() == m_window &&
+                                   (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0u;
+        const HostPadState keyboard = rrv::host::keyboardPadState(
+            keys, m_menu && m_menu->available(), leftMouseDown);
+        m_keyboardButtons = keyboard.pressedButtons;
 
         if (first.controller)
         {
 #if defined(RRV_M2P_PAD_OBSERVER)
-            const HostPadState controller = controllerStateLocked(first);
+            const HostPadState controller = hostHotkeysLocked(controllerStateLocked(first));
             publishSampleLocked(menuGateLocked(first, controller), controllerCapabilitiesLocked(first),
                                 m_keyboardButtons, controller.pressedButtons,
                                 rrv::m2ppad::SelectedSource::Controller);
 #else
-            first.cachedState = menuGateLocked(first, controllerStateLocked(first));
+            first.cachedState = menuGateLocked(first, hostHotkeysLocked(controllerStateLocked(first)));
             first.cachedCapabilities = controllerCapabilitiesLocked(first);
 #endif
             return;
         }
-        HostPadState keyboard{};
-        keyboard.connected = true;
-        keyboard.deviceId = 0x6b6579626f617264ULL; // "keyboard"
-        keyboard.pressedButtons = m_keyboardButtons;
-        keyboard.leftTrigger = (m_keyboardButtons & HostPadButtonL2) ? 1.0f : 0.0f;
-        keyboard.rightTrigger = (m_keyboardButtons & HostPadButtonR2) ? 1.0f : 0.0f;
 #if defined(RRV_M2P_PAD_OBSERVER)
-        publishSampleLocked(menuGateLocked(first, keyboard), {m_analog, false, false}, m_keyboardButtons, 0u,
+        publishSampleLocked(menuGateLocked(first, hostHotkeysLocked(keyboard)), {m_analog, false, false}, m_keyboardButtons, 0u,
                             rrv::m2ppad::SelectedSource::Keyboard);
 #else
-        first.cachedState = menuGateLocked(first, keyboard);
+        first.cachedState = menuGateLocked(first, hostHotkeysLocked(keyboard));
         first.cachedCapabilities = {m_analog, false, false};
 #endif
+    }
+
+    // Host shortcuts on port 0 (controller or keyboard), taken out of what the game sees:
+    //   L3 + R3 together toggles fast-forward (the keyboard's \\ does the same);
+    //   R3 alone (press and release) toggles the free camera (src/product/patches.cpp).
+    // Nocturne uses neither stick click. While the free camera is on, the right stick turns the
+    // camera instead of reaching the game.
+    HostPadState hostHotkeysLocked(HostPadState state)
+    {
+        constexpr uint32_t chord = HostPadButtonL3 | HostPadButtonR3;
+        const uint32_t held = state.pressedButtons & chord;
+        if (held == chord && !m_hotkeyChord)
+        {
+            m_hotkeyChord = true;
+            m_r3Pending = false;
+            if (RRV_FAST_FORWARD_AVAILABLE)
+            {
+                const bool on = rrv_fast_forward_active() == 0;
+                rrv_set_fast_forward(on ? 1 : 0);
+                std::fprintf(stderr, "[fast-forward] %s (L3+R3)\n", on ? "on" : "off");
+            }
+        }
+        if (m_hotkeyChord && held == 0u)
+            m_hotkeyChord = false;
+        if (!m_hotkeyChord)
+        {
+            if (held == HostPadButtonR3)
+                m_r3Pending = true;
+            else if (held == 0u && m_r3Pending)
+            {
+                m_r3Pending = false;
+                if (RRV_FREE_CAMERA_AVAILABLE)
+                {
+                    const bool on = rrv_free_camera_active() == 0;
+                    rrv_free_camera_set(on ? 1 : 0);
+                    std::fprintf(stderr, "[free-camera] %s\n", on ? "on" : "off");
+                }
+            }
+        }
+        state.pressedButtons &= ~HostPadButtonR3;
+        if (m_hotkeyChord)
+            state.pressedButtons &= ~HostPadButtonL3;
+        if (RRV_FREE_CAMERA_AVAILABLE)
+        {
+            const bool free = rrv_free_camera_active() != 0;
+            rrv_free_camera_stick(free ? state.rightX : 0.0f, free ? state.rightY : 0.0f);
+            if (free)
+                state.rightX = state.rightY = 0.0f;
+        }
+        return state;
     }
 
     HostPadState snapshot(unsigned port) override
@@ -851,6 +903,8 @@ private:
     std::array<std::chrono::steady_clock::time_point, 8> m_openFailedAt{};
     unsigned m_openFailedCount = 0u;
     uint32_t m_keyboardButtons = 0u;
+    bool m_hotkeyChord = false;
+    bool m_r3Pending = false;
 #if defined(RRV_M2P_PAD_OBSERVER)
     uint64_t m_sampleId = 0u;
     uint64_t m_eventOrdinal = 0u;
@@ -918,6 +972,7 @@ public:
     std::wstring refreshDevice;
     void applyDisplayRefresh(bool fullscreen, void *monitorHandle = nullptr);
     void requestFullscreen(bool fullscreen);
+    void setMetalHud(bool show);
 
     // Main thread (pumpEvents).
     void routeMenuEvent(const SDL_Event &event);
@@ -1352,6 +1407,36 @@ void SdlPresentation::Impl::applyDisplayRefresh(bool fullscreen, void *monitorHa
 }
 
 // F11 and the in-game menu. Entering: the display's rate first, then the window (see applyDisplayRefresh).
+// Shows or hides Apple's Metal Performance HUD on the window's layer
+// (CAMetalLayer.developerHUDProperties: {mode: default} shows it,
+// {mode: disabled} hides it). Through the Objective-C runtime like the full-screen
+// messages above, so no Foundation/QuartzCore headers.
+void SdlPresentation::Impl::setMetalHud(bool show)
+{
+#if defined(__APPLE__)
+    using Id = void *;
+    const auto msgSend = dlsym(RTLD_DEFAULT, "objc_msgSend");
+    const auto sel = reinterpret_cast<Id (*)(const char *)>(dlsym(RTLD_DEFAULT, "sel_registerName"));
+    const auto getClass = reinterpret_cast<Id (*)(const char *)>(dlsym(RTLD_DEFAULT, "objc_getClass"));
+    if (!metalLayer || !msgSend || !sel || !getClass)
+        return;
+    const Id dictClass = getClass("NSDictionary");
+    const Id stringClass = getClass("NSString");
+    if (!dictClass || !stringClass)
+        return;
+    const auto str = [&](const char *text) {
+        return reinterpret_cast<Id (*)(Id, Id, const char *)>(msgSend)(stringClass, sel("stringWithUTF8String:"), text);
+    };
+    // Apple: "mode" is default | main | disabled ("Customizing the Metal Performance HUD").
+    const Id props = reinterpret_cast<Id (*)(Id, Id, Id, Id)>(msgSend)(
+        dictClass, sel("dictionaryWithObject:forKey:"), str(show ? "default" : "disabled"), str("mode"));
+    reinterpret_cast<void (*)(Id, Id, Id)>(msgSend)(metalLayer, sel("setDeveloperHUDProperties:"), props);
+    std::fprintf(stderr, "[fukami-menu] Metal HUD %s\n", show ? "on" : "off");
+#else
+    (void)show;
+#endif
+}
+
 void SdlPresentation::Impl::requestFullscreen(bool fullscreen)
 {
     if (!window || windowFullscreen(window) == fullscreen)
@@ -1561,6 +1646,8 @@ void SdlPresentation::Impl::serviceMenu()
     // Requests made in the menu (GS owner thread) are carried out here.
     if (const int fullscreen = menu->takeFullscreenRequest(); fullscreen >= 0)
         requestFullscreen(fullscreen == 1);
+    if (const int hud = menu->takeMetalHudRequest(); hud >= 0)
+        setMetalHud(hud == 1);
     if (menu->takeQuitRequest())
     {
         std::fprintf(stderr, "[fukami-menu] quit\n");
@@ -1776,6 +1863,18 @@ void SdlPresentation::pumpEvents()
 {
     if (!m_impl)
         return;
+#if defined(__APPLE__)
+    // Opt-in attribution only: sampling showed substantial Cocoa event-pump
+    // activity, which must be measured before changing input servicing cadence.
+    static const bool profileEvents = [] {
+        const char *value = std::getenv("MAGATAMA_PROFILE_EVENTS");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    const auto eventWallStart = profileEvents ? std::chrono::steady_clock::now()
+                                               : std::chrono::steady_clock::time_point{};
+    timespec eventCpuStart{};
+    if (profileEvents) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &eventCpuStart);
+#endif
     SDL_Event event{};
     while (SDL_PollEvent(&event) != 0)
     {
@@ -1803,6 +1902,24 @@ void SdlPresentation::pumpEvents()
             // own full-screen flag is set (startup full screen); leave it here.
             if ((SDL_GetWindowFlags(m_impl->window) & SDL_WINDOW_FULLSCREEN) != 0u)
                 setWindowFullscreen(m_impl->window, false);
+        }
+        else if ((event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) && event.key.repeat == 0 &&
+                 (event.key.keysym.scancode == SDL_SCANCODE_GRAVE ||
+                  event.key.keysym.scancode == SDL_SCANCODE_BACKSLASH))
+        {
+            // Fast-forward for testing: hold ` (key left of 1), or press \ to toggle it on/off.
+            static bool held = false, latched = false;
+            const bool down = event.type == SDL_KEYDOWN;
+            if (event.key.keysym.scancode == SDL_SCANCODE_GRAVE)
+                held = down;
+            else if (down)
+                latched = !latched;
+            const bool on = held || latched;
+            if (RRV_FAST_FORWARD_AVAILABLE && (rrv_fast_forward_active() != 0) != on)
+            {
+                rrv_set_fast_forward(on ? 1 : 0);
+                std::fprintf(stderr, "[fast-forward] %s\n", on ? "on" : "off");
+            }
         }
         else if (m_impl->menu)
         {
@@ -1961,6 +2078,33 @@ void SdlPresentation::pumpEvents()
         }
     }
     m_impl->pad->refresh();
+#if defined(__APPLE__)
+    if (profileEvents)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        timespec cpuNow{};
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpuNow);
+        const double wallMs = std::chrono::duration<double, std::milli>(now - eventWallStart).count();
+        const double cpuMs = (cpuNow.tv_sec - eventCpuStart.tv_sec) * 1000.0 +
+                             (cpuNow.tv_nsec - eventCpuStart.tv_nsec) / 1000000.0;
+        static auto intervalStart = eventWallStart;
+        static uint64_t calls = 0;
+        static double wallTotal = 0, cpuTotal = 0, wallMax = 0;
+        ++calls;
+        wallTotal += wallMs;
+        cpuTotal += cpuMs;
+        wallMax = std::max(wallMax, wallMs);
+        const double intervalMs = std::chrono::duration<double, std::milli>(now - intervalStart).count();
+        if (intervalMs >= 2000.0)
+        {
+            std::fprintf(stderr, "[events] interval_ms=%.3f calls=%llu wall_ms=%.3f cpu_ms=%.3f max_ms=%.3f\n",
+                         intervalMs, static_cast<unsigned long long>(calls), wallTotal, cpuTotal, wallMax);
+            intervalStart = now;
+            calls = 0;
+            wallTotal = cpuTotal = wallMax = 0;
+        }
+    }
+#endif
 }
 
 bool SdlPresentation::shouldClose() const

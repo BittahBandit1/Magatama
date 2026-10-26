@@ -1689,6 +1689,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 if (n++ < 200) std::fprintf(stderr, "[after-finish] dma-start ch=%08x chcr=%08x madr=%08x qwc=%u tadr=%08x\n",
                     channelBase, value, madr, qwc, m_ioRegisters[channelBase + 0x30]);
             }
+            if (channelBase == 0x10009000u) rrv::gs::Control::note('S', m_ioRegisters[channelBase + 0x30], value);
             // Magatama: VIF1 towards memory (CHCR.DIR=0) with BUSDIR set is a GS local->host readback.
             if (channelBase == 0x10009000u && (value & 1u) == 0u && qwc != 0u && g_magatamaVif1Readback) {
                 const uint32_t bytes = qwc * 16u;
@@ -1720,6 +1721,21 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 const bool toScratchpad = (channelBase == 0x1000D400u);
                 const uint32_t sadr = m_ioRegisters[channelBase + 0x80];
                 const uint32_t mode = (value >> 2) & 0x3u;
+                {   // MAGATAMA_TRACE_SPR=<lo>:<hi> (scratchpad byte offsets): log SPR DMAs touching that range.
+                    static const std::pair<uint32_t, uint32_t> range = [] {
+                        const char* v = std::getenv("MAGATAMA_TRACE_SPR"); if (!v) return std::pair<uint32_t, uint32_t>{1u, 0u};
+                        char* e = nullptr; const uint32_t lo = std::strtoul(v, &e, 0); const uint32_t hi = (e && *e == ':') ? std::strtoul(e + 1, nullptr, 0) : lo;
+                        return std::pair<uint32_t, uint32_t>{lo, hi}; }();
+                    static int lines = 0;
+                    const uint32_t so = sadr & (PS2_SCRATCHPAD_SIZE - 1u);
+                    if (range.first <= range.second && lines < 300 && so <= range.second && so + qwc * 16u > range.first) {
+                        ++lines;
+                        uint32_t nz = 0; const uint32_t ro = translateAddress(madr) & PS2_RAM_MASK;
+                        for (uint32_t i = 0; i < qwc * 16u && ro + i < PS2_RAM_SIZE; ++i) nz += m_rdram[ro + i] != 0;
+                        std::fprintf(stderr, "[spr-dma] %s chcr=%08x madr=%08x sadr=%04x qwc=%u ramNonzero=%u\n",
+                            toScratchpad ? "toSPR" : "fromSPR", value, madr, so, qwc, nz);
+                    }
+                }
                 const uint64_t bytes = static_cast<uint64_t>(qwc) * 16ull;
                 uint32_t finalSadr = sadr;
                 uint32_t finalMadr = madr;
@@ -1800,6 +1816,31 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         chainDone = tagId == 7u || // END
                                     ((finalChcr & 0x80u) != 0u && (tagLo & 0x80000000ull) != 0u);
                     }
+                }
+                else if (m_scratchpad && qwc > 0u && (madr & 0xFFFF0000u) == 0x11000000u)
+                {
+                    // SPR DMA to/from VU memory (0x11000000-0x1100FFFF), as on hardware and in PCSX2's
+                    // dmaGetAddr. Nocturne copies VU0's skinned vertices to scratchpad this way (toSPR with
+                    // MADR in VU0 data memory); taking MADR as main RAM gave all-zero vertices.
+                    const uint32_t off = madr & 0xFFFFu;
+                    uint8_t *vuBase = nullptr; uint32_t vuSize = 0, vuOff = 0;
+                    if (off < 0x4000u) { vuBase = m_vu0Code; vuSize = PS2_VU0_CODE_SIZE; vuOff = off; }
+                    else if (off < 0x8000u) { vuBase = m_vu0Data; vuSize = PS2_VU0_DATA_SIZE; vuOff = off - 0x4000u; }
+                    else if (off < 0xC000u) { vuBase = m_vu1Code; vuSize = PS2_VU1_CODE_SIZE; vuOff = off - 0x8000u; }
+                    else { vuBase = m_vu1Data; vuSize = PS2_VU1_DATA_SIZE; vuOff = off - 0xC000u; }
+                    uint32_t sprOff = sadr & (PS2_SCRATCHPAD_SIZE - 1u);
+                    static int logged = 0;
+                    if (logged++ < 4)
+                        std::fprintf(stderr, "[spr-vumem] %s madr=%08x sadr=%04x qwc=%u\n", toScratchpad ? "toSPR" : "fromSPR", madr, sprOff, qwc);
+                    if (vuBase && vuSize)
+                        for (uint64_t i = 0; i < bytes; ++i)
+                        {
+                            uint8_t &spr = m_scratchpad[(sprOff + i) & (PS2_SCRATCHPAD_SIZE - 1u)];
+                            uint8_t &vu = vuBase[(vuOff + i) % vuSize];
+                            if (toScratchpad) spr = vu; else vu = spr;
+                        }
+                    finalMadr = static_cast<uint32_t>(madr + bytes);
+                    finalSadr = (sadr + static_cast<uint32_t>(bytes)) & (PS2_SCRATCHPAD_SIZE - 1u);
                 }
                 else if (m_scratchpad && qwc > 0u)
                 {
@@ -1943,6 +1984,24 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                                   provCurrentTag, provCurrentId});
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                        // The DMAC can read VU memory (0x11000000-0x1100FFFF: VU0 micro/data, VU1 micro/data),
+                        // as PCSX2's dmaGetAddr does. Nocturne's VIF1 lists REF the skinned vertices VU0 left in
+                        // its data memory; reading them from main RAM instead gave all-zero vertices.
+                        if ((srcAddr & 0xFFFF0000u) == 0x11000000u)
+                        {
+                            const uint32_t off = srcAddr & 0xFFFFu;
+                            const uint8_t *vuBase = nullptr; uint32_t vuSize = 0, vuOff = 0;
+                            if (off < 0x4000u) { vuBase = m_vu0Code; vuSize = PS2_VU0_CODE_SIZE; vuOff = off; }
+                            else if (off < 0x8000u) { vuBase = m_vu0Data; vuSize = PS2_VU0_DATA_SIZE; vuOff = off - 0x4000u; }
+                            else if (off < 0xC000u) { vuBase = m_vu1Code; vuSize = PS2_VU1_CODE_SIZE; vuOff = off - 0x8000u; }
+                            else { vuBase = m_vu1Data; vuSize = PS2_VU1_DATA_SIZE; vuOff = off - 0xC000u; }
+                            static int logged = 0;
+                            if (logged++ < 4)
+                                std::fprintf(stderr, "[dma-vumem] ch=%08x src=%08x qwc=%u\n", channelBase, srcAddr, qwCount);
+                            for (uint32_t i = 0; i < bytes; ++i)
+                                chainBuf.push_back(vuBase && vuSize ? vuBase[(vuOff + i) % vuSize] : 0u);
+                            return;
+                        }
                         const bool scratch = isScratchpad(srcAddr);
                         uint32_t src = 0; 
                         src = translateAddress(srcAddr); 

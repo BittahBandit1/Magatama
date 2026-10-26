@@ -202,6 +202,10 @@ Gate4StartClockV1& gate4StartClockV1(){static Gate4StartClockV1 c;return c;}
 // and cycle counts; only the host time at which starts are released changes, and
 // the audio follows (RRV_AUDIO_RATE_CONTROL, src/audio/rrv_audio_rate_control.h).
 struct Gate3RealtimePacerV1;
+// Host fast-forward request (the window's ` hold / \\ toggle keys); read by the real-time pacer every start.
+std::atomic<bool> g_rrvFastForward{false};
+extern "C" void rrv_set_fast_forward(int on){g_rrvFastForward.store(on!=0,std::memory_order_relaxed);}
+extern "C" int rrv_fast_forward_active(void){return g_rrvFastForward.load(std::memory_order_relaxed)?1:0;}
 Gate3RealtimePacerV1& gate3RealtimePacerV1();
 struct Gate3RealtimePacerV1 {
     using Clock=std::chrono::steady_clock;
@@ -264,6 +268,7 @@ struct Gate3RealtimePacerV1 {
         spin=std::chrono::milliseconds(spinMs);
         if(const char* c=std::getenv("RRV_GATE3_REALTIME_PRECISE");c&&c[0]=='0'&&!c[1])precise=false;
         if(const char* c=std::getenv("RRV_DISPLAY_LOCK");c&&c[0]=='1'&&!c[1]){lock=true;held=true;tries=1;periodNum=kLockPeriodNum;}
+        if(const char* ff=std::getenv("MAGATAMA_FAST_FORWARD");ff&&ff[0]=='1')g_rrvFastForward.store(true);
         if(!enabled)return;
         std::fprintf(stderr,"[gate3] real-time pacing: 60000/1001 effective starts per host second, catch-up %lld ms, spin %ld ms\n",
             (long long)std::chrono::duration_cast<std::chrono::milliseconds>(catchup).count(),spinMs);
@@ -280,8 +285,13 @@ struct Gate3RealtimePacerV1 {
     Clock::duration Lead()const{return std::chrono::nanoseconds(static_cast<int64_t>(kLockLead*kLockPeriodNum/kPeriodDen));}
     Clock::time_point Deadline(uint64_t k)const{
         return anchor+std::chrono::nanoseconds(static_cast<int64_t>(k*periodNum/kPeriodDen));}
+    bool turboWas=false;
     void AtStart(){
         if(!enabled)return;
+        // Host fast-forward (rrv_set_fast_forward, the ` and \\ keys): no waiting while it is held; pacing
+        // re-anchors on release so the game does not try to "catch up" the skipped time.
+        if(g_rrvFastForward.load(std::memory_order_relaxed)){turboWas=true;return;}
+        if(turboWas){turboWas=false;anchored=false;}
         if(++starts<=fastForward){
             if(starts==fastForward)std::fprintf(stderr,"[gate3] fast-forward reached start %llu; pacing from here\n",
                 (unsigned long long)starts);
@@ -508,11 +518,29 @@ void PS2Runtime::gate3ConfigureTemporalV1(const rrv::guest_time::TemporalProfile
     gate3HardwareV1();
 }
 void PS2Runtime::gate3ResolveTimedWaitsV1() {
-    for(auto& wait:m_gate3TimedWaitsV1)
-        if(!wait.ticket->resolved && wait.ready())gate3Scheduler.resolve(wait.ticket,0);
+    // starts() changes only when HardwareTo crosses a modeled video boundary.
+    // quiet_until() ends at the next hardware deadline, so these pure waits
+    // cannot become ready during the existing checkpoint fast path.
+    // Wait tickets are created and registered consecutively under the producer
+    // permit. Merge by their sequence to preserve the original resolution
+    // order when generic and video-start waits become ready together.
+    auto timed=m_gate3TimedWaitsV1.begin(); auto start=m_gate3StartWaitsV1.begin();
+    while(timed!=m_gate3TimedWaitsV1.end() || start!=m_gate3StartWaitsV1.end()){
+        if(start!=m_gate3StartWaitsV1.end() && (timed==m_gate3TimedWaitsV1.end() ||
+           start->ticket->sequence<timed->ticket->sequence)){
+            if(!start->ticket->resolved && gate3TemporalV1().starts()>=start->start)
+                gate3Scheduler.resolve(start->ticket,0);
+            ++start;
+        }else{
+            if(!timed->ticket->resolved && timed->ready())gate3Scheduler.resolve(timed->ticket,0);
+            ++timed;
+        }
+    }
     rrv::guest_time::QuietBumpProducer();
     m_gate3TimedWaitsV1.erase(std::remove_if(m_gate3TimedWaitsV1.begin(),m_gate3TimedWaitsV1.end(),
         [](const auto& wait){return wait.ticket->resolved.load();}),m_gate3TimedWaitsV1.end());
+    m_gate3StartWaitsV1.erase(std::remove_if(m_gate3StartWaitsV1.begin(),m_gate3StartWaitsV1.end(),
+        [](const auto& wait){return wait.ticket->resolved.load();}),m_gate3StartWaitsV1.end());
 }
 void PS2Runtime::gate3HardwareV1() {
     m_gate3QuietV1.armed=false;rrv::guest_time::QuietBumpProducer(); // Every hardware commit outside the fast path re-validates.
@@ -622,6 +650,12 @@ static void gate3TracePcV1(PS2Runtime* runtime,R5900Context* ctx) {
             (unsigned long long)n,ctx->pc,rrv::guest_time::context_id,(unsigned long long)runtime->gate3TemporalV1().now(),(unsigned long long)acc);
     }
     if(!t.on||ctx->pc<t.lo||ctx->pc>t.hi||runtime->gate3TemporalV1().starts()!=t.start)return;
+    // Optional diagnostic cap prevents a stuck guest loop from flooding the log.
+    static const uint64_t limit=[] { const char* v=std::getenv("RRV_GATE3_TRACE_PC_LIMIT");
+        return v ? std::strtoull(v,nullptr,10) : 0ull; }();
+    static uint64_t emitted=0;
+    if(limit && emitted>=limit)return;
+    ++emitted;
     const auto fnv=[](const void* p,size_t n){uint64_t h=1469598103934665603ull;const auto* b=static_cast<const uint8_t*>(p);
         for(size_t i=0;i<n;++i){h^=b[i];h*=1099511628211ull;}return h;};
     std::fprintf(stderr,"[gate3-trace] pc=0x%x ctx=%d v1=0x%x a1=0x%x a2=0x%x t4=0x%x gpr=%016llx fpr=%016llx vu0=%016llx fcr=%08x cycle=%llu\n",
@@ -630,6 +664,17 @@ static void gate3TracePcV1(PS2Runtime* runtime,R5900Context* ctx) {
         uint32_t(_mm_cvtsi128_si32(ctx->r[12])),(unsigned long long)fnv(ctx->r,sizeof(ctx->r)),
         (unsigned long long)fnv(ctx->f,sizeof(ctx->f)),(unsigned long long)fnv(ctx->vu0_vf,sizeof(ctx->vu0_vf)),ctx->fcr31,
         (unsigned long long)runtime->gate3TemporalV1().now());
+    uint32_t bits[32]; std::memcpy(bits,ctx->f,sizeof(bits));
+    std::fprintf(stderr,"[gate3-trace-fpu] pc=0x%x f0=%08x f1=%08x f2=%08x f3=%08x f12=%08x f13=%08x f20=%08x f21=%08x f22=%08x f23=%08x s6=%08x\n",
+        ctx->pc,bits[0],bits[1],bits[2],bits[3],bits[12],bits[13],bits[20],bits[21],bits[22],bits[23],
+        uint32_t(_mm_cvtsi128_si32(ctx->r[22])));
+    std::fprintf(stderr,"[gate3-trace-address] gp=%08x sp=%08x a0=%08x s1=%08x s2=%08x\n",
+        uint32_t(_mm_cvtsi128_si32(ctx->r[28])),uint32_t(_mm_cvtsi128_si32(ctx->r[29])),
+        uint32_t(_mm_cvtsi128_si32(ctx->r[4])),uint32_t(_mm_cvtsi128_si32(ctx->r[17])),uint32_t(_mm_cvtsi128_si32(ctx->r[18])));
+    for(int v : {10,28,29,30}) {
+        uint32_t lanes[4]; std::memcpy(lanes,&ctx->vu0_vf[v],sizeof(lanes));
+        std::fprintf(stderr,"[gate3-trace-vu] vf%d=%08x,%08x,%08x,%08x\n",v,lanes[0],lanes[1],lanes[2],lanes[3]);
+    }
 }
 // Gate-4 fast path: the previous full checkpoint serviced nothing and none
 // of its inputs changed; the owner confirms no deadline is at or before the
@@ -681,7 +726,7 @@ uint64_t PS2Runtime::gate3QuietFullV1() const { return m_gate3QuietV1.full; }
 void PS2Runtime::gate3ArmQuietV1(R5900Context* ctx) {
     // Arm only when a repeat of the full path at a later, pre-deadline cycle
     // would do nothing but move time: no diagnostics that sample every
-    // checkpoint, no timed wait, no ready alarm, no due CD group, no
+    // checkpoint, no arbitrary-predicate timed wait, no ready alarm, no due CD group, no
     // deliverable or SBUS-latching INTC state, no asserted GS interrupt level.
     auto& q=m_gate3QuietV1; q.armed=false;rrv::guest_time::QuietBumpProducer();
     static const bool diagnostics=gate3WatchV1().enabled ||
@@ -705,6 +750,11 @@ void PS2Runtime::gate3SetWaitContextV1(R5900Context* ctx){m_gate3QuietV1.armed=f
 void PS2Runtime::gate3AddTimedWaitV1(rrv::guest_time::Scheduler::Ticket ticket,std::function<bool()> ready){
     m_gate3QuietV1.armed=false;rrv::guest_time::QuietBump();
     m_gate3TimedWaitsV1.push_back({std::move(ticket),std::move(ready)});rrv::guest_time::QuietBump();
+}
+void PS2Runtime::gate3AddStartWaitV1(rrv::guest_time::Scheduler::Ticket ticket,uint64_t start){
+    if(!m_gate3TemporalV1)throw std::logic_error("Gate3 video-start wait without temporal owner");
+    m_gate3QuietV1.armed=false;rrv::guest_time::QuietBump();
+    m_gate3StartWaitsV1.push_back({std::move(ticket),start});rrv::guest_time::QuietBump();
 }
 void PS2Runtime::gate3IdleV1(){
     if(!m_gate3TemporalV1)return;
@@ -730,7 +780,8 @@ void PS2Runtime::gate3IdleV1(){
             continue;
         }
         stalled=false;
-        if(m_gate3TimedWaitsV1.empty() && !gate3TemporalV1().HasAdmissions() && !gate3TemporalV1().HasAlarms() &&
+        if(m_gate3TimedWaitsV1.empty() && m_gate3StartWaitsV1.empty() &&
+           !gate3TemporalV1().HasAdmissions() && !gate3TemporalV1().HasAlarms() &&
            !ps2_syscalls::gate3HasTemporalWake(gate3WaitContexts.at(this),this))
             throw std::logic_error("Gate3 all blocked: no admitted temporal wake source");
         const auto next=gate3TemporalV1().NextDeadline();
@@ -855,10 +906,61 @@ bool PS2Runtime::gate3MmioReadV1(uint32_t address,unsigned width,uint64_t& value
     const auto physical=address&0x1fffffffU;
     if(physical>=0x12001080u && physical<0x12001088u){rrv::gate4::ownerBarrier(rrv::gate4::BarrierKind::SiglblidRead);gate4FenceV1();}
     if(physical>=0x12001000u && physical<0x12001008u){
+        // MAGATAMA_CSR_PROFILE=1: which guest PCs poll CSR, and how often (printed every 600 starts).
+        static const bool csrProfile=[]{const char* v=std::getenv("MAGATAMA_CSR_PROFILE");return v&&v[0]=='1';}();
+        if(csrProfile){
+            static std::map<uint32_t,uint64_t> byPc; static uint64_t lastStart=0;
+            const auto found=gate3WaitContexts.find(this);
+            ++byPc[found==gate3WaitContexts.end()?0u:found->second->pc];
+            const uint64_t st=gate3TemporalV1().starts();
+            if(st/600!=lastStart/600){lastStart=st;std::fprintf(stderr,"[csr-profile] start=%llu",(unsigned long long)st);
+                for(auto& [pc,n]:byPc)std::fprintf(stderr," %x=%llu",pc,(unsigned long long)n);std::fprintf(stderr,"\n");byPc.clear();}
+        }
         rrv::gate4::ownerBarrier(rrv::gate4::BarrierKind::CsrRead);
         gate4FenceV1();
         gate3PublishCsrV1();value=m_memory.gs().csr>>((physical-0x12001000u)*8);
         if(width<8)value&=(uint64_t(1)<<(width*8))-1;
+        {   // A guest spinning on CSR without FINISH: report the producer state once per spin (always on, cheap).
+            static uint64_t spin=0; static int reports=0;
+            if((m_memory.gs().csr&2u)==0u){
+                ++spin;
+                // FINISH lost to an EE/owner ordering race (it was raised before the guest's own pre-clear):
+                // the guest has sent its FINISH packet (VIF1 idle), nothing is left to decode, and it polls
+                // forever. Raise FINISH again rather than hang. Logged; the cause is still under investigation.
+                const auto spinPc=[&]{const auto f=gate3WaitContexts.find(this);return f==gate3WaitContexts.end()?0u:f->second->pc;};
+                if(spin==20000u && (m_memory.readIORegister(0x10009000u)&0x100u)==0u && !m_memory.gsControl().finishPending() &&
+                   !m_gifArbiter.controlQueued() && spinPc()>=0x2add30u && spinPc()<=0x2add50u){
+                    static uint64_t rescues=0;
+                    rrv::guest_time::QuietBump(); // Retire a window armed by the preceding CSR fence.
+                    m_memory.gs().csr|=2u; value=m_memory.gs().csr>>((physical-0x12001000u)*8);
+                    if(width<8)value&=(uint64_t(1)<<(width*8))-1;
+                    if(++rescues<=20||rescues%100==0)std::fprintf(stderr,"[finish-rescue] #%llu start=%llu\n",(unsigned long long)rescues,(unsigned long long)gate3TemporalV1().starts());
+                    spin=0;
+                }
+                if(spin==200000u && reports++<20){
+                    const uint32_t work=static_cast<uint32_t>(m_memory.gsResultBoundary().work);
+                    const auto found=gate3WaitContexts.find(this);
+                    std::fprintf(stderr,"[csr-spin] pc=%x finishes=%llu d1: chcr=%08x madr=%08x qwc=%x tadr=%08x dstat=%08x vif1stat=%08x\n",
+                        found==gate3WaitContexts.end()?0u:found->second->pc,(unsigned long long)m_memory.gsControl().counters().finishes,
+                        m_memory.readIORegister(0x10009000u),m_memory.readIORegister(0x10009010u),m_memory.readIORegister(0x10009020u),
+                        m_memory.readIORegister(0x10009030u),m_memory.readIORegister(0x1000E010u),m_memory.readIORegister(0x10003C00u));
+                    std::fprintf(stderr,"[csr-spin] start=%llu csr=%llx imr=%llx finishPending=%d work=%#x p1=%d p2=%d p3=%d queued=%d\n",
+                        (unsigned long long)gate3TemporalV1().starts(),(unsigned long long)m_memory.gs().csr,(unsigned long long)m_memory.gs().imr,
+                        (int)m_memory.gsControl().finishPending(),work,(int)m_gifArbiter.controlPendingPath(1),(int)m_gifArbiter.controlPendingPath(2),
+                        (int)m_gifArbiter.controlPendingPath(3),(int)m_gifArbiter.controlQueued());
+                    {   const auto& k=m_memory.gsControl().counters();
+                        std::fprintf(stderr,"[csr-spin] counters finishes=%llu deliveries=%llu acks=%llu csrWrites=%llu\n",(unsigned long long)k.finishes,
+                            (unsigned long long)k.finishDeliveries,(unsigned long long)k.finishAcks,(unsigned long long)k.csrWrites);
+                        const uint32_t t=m_memory.readIORegister(0x10009030u)&0x01FFFFF0u;
+                        for(uint32_t a=t-0x60;a<t;a+=16){uint32_t w[4];std::memcpy(w,m_memory.getRDRAM()+a,16);
+                            std::fprintf(stderr,"[csr-spin] ram %08x: %08x %08x %08x %08x\n",a,w[0],w[1],w[2],w[3]);} }
+                    rrv::gs::Control::dumpTrace();
+                    if(const auto* c=m_gifArbiter.controlCursor())
+                        std::fprintf(stderr,"[csr-spin] cursor path=%u tagValid=%d remaining=%u format=%u eop=%d reg=%u\n",c->activePath,(int)c->tagValid,
+                            c->remainingQwords,c->format,(int)c->eop,c->registerIndex);
+                }
+            } else { if(spin>=20000u && reports<=20) std::fprintf(stderr,"[csr-spin] ended after %llu reads at start=%llu\n",(unsigned long long)spin,(unsigned long long)gate3TemporalV1().starts()); spin=0; }
+        }
         if(rrv::gs::Control::afterFinishTrace()){static uint64_t last=~0ull,rep=0;static int lines=0;
             if(value==last)++rep;else{if(lines++<100)std::fprintf(stderr,"[after-finish] csr-read=%llx gsctl-csr=%llx (previous repeated %llu)\n",
                 (unsigned long long)value,(unsigned long long)m_memory.gsControl().debugCsr(),(unsigned long long)rep);last=value;rep=0;}}
@@ -958,6 +1060,21 @@ void PS2Runtime::gate3LazyStatV1(R5900Context* ctx) {
 }
 void PS2Runtime::gate3LazyVerifyV1(R5900Context* ctx,uint64_t cycles) {
     if(gate3LazyPredicateV1(ctx,rrv::guest_time::context_id,cycles))return;
+    // Host-thread scheduler entry updates its version and quiet generation.
+    // It can race the caller's generation read even while guest execution is
+    // serialized. Retire the stale window and let the caller run the full
+    // checkpoint. Stable-generation predicate mismatches still fail below.
+    if(rrv::guest_time::quiet_generation.load(std::memory_order_relaxed)!=m_gate3LazyV1.generation ||
+       !gate3Scheduler.quiet(rrv::guest_time::context_id)){
+        m_gate3LazyV1.ctx=nullptr;
+        return;
+    }
+    const auto& q=m_gate3QuietV1; const auto& gs=m_memory.gs(); auto& owner=gate3TemporalV1();
+    std::fprintf(stderr,"[gate4-lazy] inputs armed=%d trace=%d ctx=%d context=%d/%d cop0=%x/%x waits=%zu starts_waits=%zu cd=%llu/%llu gs=%d,%d,%d,%d intc=%x/%x,%x/%x sched=%d\n",
+        q.armed,q.trace,q.ctx==ctx,q.context,rrv::guest_time::context_id,q.cop0,ctx->cop0_status,
+        m_gate3TimedWaitsV1.size(),m_gate3StartWaitsV1.size(),(unsigned long long)q.cdReadyBytes,(unsigned long long)gate3CdReadyBytesV1(),
+        q.smode1==gs.smode1,q.syncv==gs.syncv,q.csr==gs.csr,q.imr==gs.imr,
+        q.stat,owner.intc().ReadStat(),q.mask,owner.intc().ReadMask(),gate3Scheduler.quiet(rrv::guest_time::context_id));
     std::fprintf(stderr,"[gate4-lazy] VERIFY FAILED pc=0x%x context=%d cycles=%llu now=%llu until=%llu\n",
         ctx->pc,rrv::guest_time::context_id,(unsigned long long)cycles,
         (unsigned long long)gate3TemporalV1().now(),(unsigned long long)gate3TemporalV1().quiet_until());

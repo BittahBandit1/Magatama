@@ -109,7 +109,7 @@ struct LaunchConfig
     // [rendering]
     std::string renderMode = "full";
     int scale = 4;
-    bool aa1 = true, fxaa = false;
+    bool aa1 = true, fxaa = true;
     int cas = 0, aniso = 0;
     std::string textureFilter = "ps2";
     std::string spriteFilter = "even"; // point-sampled 2D sprites: even | ps2 (RRV_PCSX2_GS_SPRITE_FILTER)
@@ -231,7 +231,7 @@ template <class Getter> LaunchConfig LaunchConfig::fromEnvironment(Getter get)
     if (set("RRV_PCSX2_GS_FULL_SCALE"))
         c.scale = std::atoi(text("RRV_PCSX2_GS_FULL_SCALE").c_str());
     c.aa1 = text("RRV_PCSX2_GS_FULL_HWAA1") != "0";
-    c.fxaa = text("RRV_PCSX2_GS_FXAA") == "1";
+    c.fxaa = text("RRV_PCSX2_GS_FXAA") != "0"; // on unless explicitly turned off
     c.cas = set("RRV_PCSX2_GS_CAS") ? std::atoi(text("RRV_PCSX2_GS_CAS").c_str()) : 0;
     c.aniso = set("RRV_PCSX2_GS_ANISO") ? std::atoi(text("RRV_PCSX2_GS_ANISO").c_str()) : 0;
     c.textureFilter = set("RRV_PCSX2_GS_TEXTURE_FILTER") ? text("RRV_PCSX2_GS_TEXTURE_FILTER") : "ps2";

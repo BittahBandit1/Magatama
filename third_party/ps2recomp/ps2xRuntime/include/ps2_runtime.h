@@ -173,6 +173,9 @@ struct alignas(16) R5900Context
         std::memset(this, 0, sizeof(*this));
 
         // Initialize VU0 registers
+        // VF0 is the architectural (0,0,0,1) constant, including before the
+        // first microprogram. Macro-mode quaternion math also reads VF0.w.
+        vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
         vu0_q = 1.0f; // Q register usually initialized to 1.0
 
         // Reset COP0 registers
@@ -934,6 +937,9 @@ public:
     void gate3IdleV1();
     void gate3SetWaitContextV1(R5900Context* ctx);
     void gate3AddTimedWaitV1(rrv::guest_time::Scheduler::Ticket ticket, std::function<bool()> ready);
+    // A pure video-start wait cannot become ready inside a temporal quiet
+    // window; unlike an arbitrary predicate it needs no per-instruction poll.
+    void gate3AddStartWaitV1(rrv::guest_time::Scheduler::Ticket ticket, uint64_t start);
     void gate3ResolveTimedWaitsV1();
     void gate3RunCallbackV1(R5900Context* interrupted, uint32_t handler, uint32_t gp,
                             uint32_t a0, uint32_t a1, uint32_t a2, bool irq = false, uint32_t deferAdmissions = 0);
@@ -1066,8 +1072,14 @@ public:
                 ctx->cop0_status == lazy.cop0 &&
                 rrv::guest_time::quiet_generation.load(std::memory_order_relaxed) == lazy.generation) {
                 gate3LazyVerifyV1(ctx, cycles);
-                *lazy.now = cycles;
-                return;
+                // Scheduler metadata may change after the generation check
+                // above. Verification invalidates that window; service the
+                // full checkpoint below rather than treating it as quiet.
+                if (ctx == lazy.ctx &&
+                    rrv::guest_time::quiet_generation.load(std::memory_order_relaxed) == lazy.generation) {
+                    *lazy.now = cycles;
+                    return;
+                }
             }
         }
         if (__builtin_expect(m_gate3LazyV1.stats, false)) gate3LazyStatV1(ctx);
@@ -1314,6 +1326,8 @@ private:
 
     struct Gate3TimedWait { rrv::guest_time::Scheduler::Ticket ticket; std::function<bool()> ready; };
     std::vector<Gate3TimedWait> m_gate3TimedWaitsV1;
+    struct Gate3StartWait { rrv::guest_time::Scheduler::Ticket ticket; uint64_t start; };
+    std::vector<Gate3StartWait> m_gate3StartWaitsV1;
     bool m_gate3HardwareActiveV1 = false;
     // Gate-4 checkpoint fast path. Armed at the end of a full checkpoint that
     // found nothing to service; any other hardware commit, wait-context,

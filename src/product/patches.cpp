@@ -22,6 +22,7 @@
 #include "rrv_guest_scheduler.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -70,6 +71,44 @@ static PS2Runtime::RecompiledFunction magatamaResolveStub(std::string_view n) {
     return nullptr;
 }
 
+// The callback table at 0x31DFAC (entry 57, slot 0x31E894) references
+// 0x193478. Generation folded this leaf into entry_00193468 after that
+// routine's return, leaving it unreachable through the function dispatcher.
+// Preserve the original two instructions, including the store in the JR delay
+// slot; the locked SLUS_209.11 contains 03E00008 AC850024 at this address.
+static void nocturneCallback193478(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    ctx->pc = 0x193478u; // jr $ra
+    runtime->gate3CheckpointV1(ctx);
+    runtime->gate3BeginInstructionV1(ctx);
+    const uint32_t target = GPR_U32(ctx, 31);
+    ctx->pc = 0x19347Cu;
+    ctx->in_delay_slot = true;
+    ctx->branch_pc = 0x193478u;
+    runtime->gate3BeginInstructionV1(ctx);
+    WRITE32(ADD32(GPR_U32(ctx, 4), 36), GPR_U32(ctx, 5)); // sw $a1,0x24($a0)
+    ctx->in_delay_slot = false;
+    ctx->pc = target;
+}
+
+// Additional colour leaves omitted by the same discovery gap as193478.
+// The USA ELF contains JR $ra; SW $a1,offset($a0) at each entry. Restore
+// callable entries, including the delay-slot store; never call the enclosing
+// position setter, whose earlier return makes these instructions unreachable.
+template<uint32_t Entry, uint32_t Offset>
+static void nocturneEffectColorCallback(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    ctx->pc = Entry;
+    runtime->gate3CheckpointV1(ctx);
+    runtime->gate3BeginInstructionV1(ctx);
+    const uint32_t target = GPR_U32(ctx, 31);
+    ctx->pc = Entry + 4;
+    ctx->in_delay_slot = true;
+    ctx->branch_pc = Entry;
+    runtime->gate3BeginInstructionV1(ctx);
+    WRITE32(ADD32(GPR_U32(ctx, 4), Offset), GPR_U32(ctx, 5));
+    ctx->in_delay_slot = false;
+    ctx->pc = target;
+}
+
 // ── RRV_FN_HITS: guest-function entry counter (default off) ───────────────
 namespace {
 std::map<uint32_t, PS2Runtime::RecompiledFunction>& fnHitOrig() {
@@ -97,10 +136,32 @@ void fnHitTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
             (unsigned long long)runtime->gate3TemporalV1().starts(), entry, GPR_U32(ctx, 4), GPR_U32(ctx, 31));
     }
     if (auto it = fnHitOrig().find(entry); it != fnHitOrig().end() && it->second) {
+        // Optional slow-call receipts for selected RRV_FN_HITS functions. These
+        // are inclusive wall times (including nested calls and guest waits),
+        // not exclusive CPU samples. Never emit a line for every frame.
+        static const uint64_t slowUs = [] {
+            const char* v = std::getenv("MAGATAMA_FN_SLOW_US");
+            return v ? std::strtoull(v, nullptr, 10) : 0ull;
+        }();
+        static std::atomic<uint32_t> slowLogged{0};
+        const uint64_t firstField = slowUs ? runtime->gate3TemporalV1().starts() : 0;
+        const uint32_t caller = slowUs ? GPR_U32(ctx, 31) : 0;
+        const int guestContext = rrv::guest_time::context_id;
         const auto t0 = std::chrono::steady_clock::now();
         it->second(rdram, ctx, runtime);
-        fnHitNs()[entry].fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
+        const auto t1 = std::chrono::steady_clock::now();
+        const uint64_t elapsedNs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        fnHitNs()[entry].fetch_add(elapsedNs, std::memory_order_relaxed);
+        if (slowUs && elapsedNs / 1000 >= slowUs &&
+            slowLogged.fetch_add(1, std::memory_order_relaxed) < 2048) {
+            std::fprintf(stderr,
+                "[fn-slow] pc=%08x ra=%08x ctx=%d fields=%llu-%llu host_begin_us=%llu elapsed_us=%llu inclusive=1\n",
+                entry, caller, guestContext, static_cast<unsigned long long>(firstField),
+                static_cast<unsigned long long>(runtime->gate3TemporalV1().starts()),
+                static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    t0.time_since_epoch()).count()), static_cast<unsigned long long>(elapsedNs / 1000));
+        }
     } else if (ctx->pc == entry) {
         std::fprintf(stderr, "[fn-hits] %08x has no body to forward to\n", entry);
         ctx->pc = GPR_U32(ctx, 31);
@@ -226,6 +287,7 @@ static constexpr uint32_t kNocturneThreadStatus = 0x00010C01u;
 // VBlank start in guest time. MAGATAMA_CD_LATENCY=0 turns it off.
 namespace ps2_syscalls {
 int gate3TemporalWait(uint8_t*, R5900Context* ctx, PS2Runtime* runtime, std::function<bool()> ready);
+int gate3TemporalWaitForStart(uint8_t*, R5900Context* ctx, PS2Runtime* runtime, uint64_t start);
 }
 namespace {
 std::map<uint32_t, PS2Runtime::RecompiledFunction>& cdLatencyOrig() { static std::map<uint32_t, PS2Runtime::RecompiledFunction> m; return m; }
@@ -237,10 +299,22 @@ void cdLatencyTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
     const uint32_t pc = ctx->pc;
     auto& owner = runtime->gate3TemporalV1();
     const uint64_t target = owner.starts() + 1;
-    ps2_syscalls::gate3TemporalWait(rdram, ctx, runtime, [&owner, target] { return owner.starts() >= target; });
+    // Keep the exact same one-start latency and wait
+    // result, but describe its readiness to the temporal owner explicitly.
+    // Arbitrary waits retain their original per-checkpoint polling behavior.
+    static const bool startWait = [] {
+        const char* v = std::getenv("MAGATAMA_CD_START_WAIT");
+        return !(v && std::strcmp(v, "0") == 0);
+    }();
+    if (startWait)
+        ps2_syscalls::gate3TemporalWaitForStart(rdram, ctx, runtime, target);
+    else
+        ps2_syscalls::gate3TemporalWait(rdram, ctx, runtime, [&owner, target] { return owner.starts() >= target; });
     ctx->r[2] = v0; ctx->r[3] = v1; ctx->pc = pc;
 }
 void armCdLatency(PS2Runtime& runtime) {
+    if (const char* v = std::getenv("MAGATAMA_CD_START_WAIT"); !(v && std::strcmp(v, "0") == 0))
+        std::fprintf(stderr, "[cd-latency] modeled video-start wait enabled; one-start delay unchanged\n");
     for (const uint32_t addr : {0x2BDB80u, 0x2BDBD0u}) {
         if (!runtime.hasFunction(addr)) continue;
         cdLatencyOrig()[addr] = runtime.lookupFunction(addr);
@@ -581,6 +655,9 @@ std::map<uint32_t, PS2Runtime::RecompiledFunction> g_silentSoundOrig;
 void silentSoundTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
     const uint32_t entry = ctx->pc, ra = GPR_U32(ctx, 31), a0 = GPR_U32(ctx, 4);
     std::string path;
+    const auto memoryBank=entry==0x2C10E8u && a0==0x1B0u
+        ? nocturneSilentMemoryMidiBank(rdram,32u*1024u*1024u,GPR_U32(ctx,6),GPR_U32(ctx,7))
+        : std::nullopt;
     if (entry == 0x2C10E8u && a0 == 0xA0u && GPR_U32(ctx, 7) >= 20u)
         path = guestString(rdram, GPR_U32(ctx, 6));
     g_silentSoundOrig.at(entry)(rdram, ctx, runtime);
@@ -595,6 +672,10 @@ void silentSoundTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtim
             std::fprintf(stderr, "[sound-silent] virtual bank request %04lx ready after frame %llu\n",
                 bank, (unsigned long long)frame);
         }
+    } else if (entry == 0x2C10E8u && GPR_U32(ctx,2)!=0 && memoryBank) {
+        g_silentSoundBanks.request(*memoryBank,frame);
+        std::fprintf(stderr,"[sound-silent] virtual memory bank request %04x ready after frame %llu\n",
+            unsigned(*memoryBank),(unsigned long long)frame);
     } else if (entry == 0x2C1C20u &&
                g_silentSoundBanks.ready(static_cast<uint16_t>(a0 >> 16), frame)) {
         SET_GPR_U32(ctx, 2, 1u); // Nocturne's resident-bank status, observed in its query routine
@@ -677,6 +758,165 @@ void armSilentMovieAudio(PS2Runtime& runtime) {
 }
 } // namespace
 
+// MAGATAMA_FRAME448=1 (experiment): full-height frames. Nocturne's screen table (0x529358, 12-byte entries:
+// w, display h, buffer h, psm, zpsm, mode) gives every mode a 448-line display but a 224-line draw buffer: the game
+// renders one half-height field per vsync. FUN_002A9AA8 copies the chosen entry into the live config the buffer
+// allocator and the display setup read; doubling the buffer height there asks the game for 448-line buffers.
+namespace {
+PS2Runtime::RecompiledFunction g_screenCfgOrig;
+PS2Runtime::RecompiledFunction g_screenResetOrig;
+void screenResetFieldMode(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    if (GPR_U32(ctx, 4) == 0u) {
+        // Retain the supported NTSC interlaced counter route. FIELD mode
+        // scans a full-height buffer; FRAME mode uses a half-height buffer.
+        SET_GPR_U32(ctx, 7, 0u);
+        std::fprintf(stderr, "[frame448] interlaced FIELD scanout trial\n");
+    }
+    g_screenResetOrig(rdram, ctx, runtime);
+}
+void screenCfg448(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t dst = GPR_U32(ctx, 4) & 0x01FFFFFFu;
+    g_screenCfgOrig(rdram, ctx, runtime);
+    int16_t dispH, bufH;
+    std::memcpy(&dispH, rdram + dst + 2u, 2);
+    std::memcpy(&bufH, rdram + dst + 4u, 2);
+    if (bufH * 2 == dispH) {
+        std::memcpy(rdram + dst + 4u, &dispH, 2);
+        std::fprintf(stderr, "[frame448] screen config %08x: buffer height %d -> %d\n", dst, bufH, dispH);
+        // Optional VRAM-budget trial: 512x448 Z16 saves 448 KiB, allowing
+        // the movie's 768 KiB texture to fit beside the full-height buffers.
+        // Depth/projection correctness still needs replay validation.
+        const char* z16 = std::getenv("MAGATAMA_FRAME448_Z16");
+        if (z16 && z16[0] == '1' && rdram[dst + 7u] == 0x30u) {
+            rdram[dst + 7u] = 0x32u;
+            std::fprintf(stderr, "[frame448] experimental depth format PSMZ32 -> PSMZ16\n");
+        }
+    }
+}
+void armFrame448(PS2Runtime& runtime) {
+    if (!runtime.hasFunction(0x2A9AA8u)) throw std::runtime_error("Nocturne screen config target missing");
+    g_screenCfgOrig = runtime.lookupFunction(0x2A9AA8u);
+    runtime.registerFunction(0x2A9AA8u, screenCfg448);
+    const char* fieldMode = std::getenv("MAGATAMA_FRAME448_FIELD_MODE");
+    if (fieldMode && fieldMode[0] == '1') {
+        if (!runtime.hasFunction(0x2C81A8u)) throw std::runtime_error("Nocturne ResetGraph target missing");
+        g_screenResetOrig = runtime.lookupFunction(0x2C81A8u);
+        runtime.registerFunction(0x2C81A8u, screenResetFieldMode);
+    }
+}
+} // namespace
+
+// Optional VRAM arena diagnostics: both allocation directions share 28-byte
+// region records. Log before entering the allocator, which can spin on failure.
+namespace {
+struct VramTap { PS2Runtime::RecompiledFunction orig; uint64_t calls = 0; };
+std::map<uint32_t, VramTap> g_vramTaps;
+void vramTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t entry = ctx->pc;
+    auto& tap = g_vramTaps.at(entry);
+    const uint32_t gp = GPR_U32(ctx, 28) & 0x01ffffffu;
+    ++tap.calls;
+    if (tap.calls <= 512 && gp >= 0x20e0u && gp < 0x02000000u) {
+        const uint32_t head = guestWord(rdram, gp - 0x20e0u);
+        uint32_t node = head, largest = 0, nodes = 0;
+        uint64_t freeWords = 0;
+        while (node && node <= 0x02000000u - 28u && nodes < 512u) {
+            ++nodes;
+            if (guestWord(rdram, node + 8u) == 0u) {
+                const uint32_t size = guestWord(rdram, node + 16u);
+                freeWords += size;
+                largest = std::max(largest, size);
+            }
+            node = guestWord(rdram, node + 4u);
+            if (node == head) break;
+        }
+        std::fprintf(stderr, "[vram-summary] pc=%08x n=%llu caller=%08x ctx=%d request=%08x "
+            "free=%llx largest=%08x nodes=%u\n", entry, (unsigned long long)tap.calls,
+            GPR_U32(ctx, 31), rrv::guest_time::context_id, GPR_U32(ctx, 4),
+            (unsigned long long)freeWords, largest, nodes);
+    }
+    if (tap.calls <= 32 || GPR_U32(ctx, 4) >= 0x10000u) {
+        std::fprintf(stderr, "[vram] enter pc=%08x caller=%08x ctx=%d request=%08x tag=%08x\n",
+            entry, GPR_U32(ctx, 31), rrv::guest_time::context_id, GPR_U32(ctx, 4), GPR_U32(ctx, 5));
+        if (gp >= 0x20e0u && gp < 0x02000000u) {
+            for (uint32_t offset : {0x20e0u, 0x20dcu}) {
+                const uint32_t head = guestWord(rdram, gp - offset);
+                uint32_t node = head;
+                for (unsigned i = 0; node && node <= 0x02000000u - 28u && i < 32; ++i) {
+                    std::fprintf(stderr, "[vram] head=-%04x node=%08x prev=%08x next=%08x "
+                        "tag=%08x start=%08x size=%08x\n", offset, node,
+                        guestWord(rdram, node), guestWord(rdram, node + 4u),
+                        guestWord(rdram, node + 8u), guestWord(rdram, node + 12u), guestWord(rdram, node + 16u));
+                    node = guestWord(rdram, node + (offset == 0x20e0u ? 4u : 0u));
+                    if (node == head) break;
+                }
+            }
+        }
+    }
+    tap.orig(rdram, ctx, runtime);
+}
+void armVramTrace(PS2Runtime& runtime) {
+    for (uint32_t addr : {0x2AA438u, 0x2AA558u}) {
+        if (!runtime.hasFunction(addr)) throw std::runtime_error("Nocturne VRAM allocator target missing");
+        g_vramTaps[addr] = {runtime.lookupFunction(addr), 0};
+        runtime.registerFunction(addr, vramTrampoline);
+    }
+}
+} // namespace
+
+// Free camera (R3 toggles; Magatama addition, off by default). Stock Nocturne only "peeks" with the right stick:
+// fldCamMain switches to fldCamUpdateChase while the stick is pushed (the angle follows the stick, then swings back on
+// release), and fldPlayerCalc_Nml ignores movement meanwhile. In free-camera mode the host hides the right stick from
+// the game and instead turns the field camera yaw (gp-0x570C = 0x54EA64, degrees; calcCamNormal places the camera from
+// it and the player code moves relative to it), so the view stays where it is put and walking follows the view.
+// MAGATAMA_CAMLOG=1 also logs yaw/player rotation/stick bytes every 20 calls.
+std::atomic<int> g_freeCamera{0};
+std::atomic<float> g_freeCameraStickX{0.0f}, g_freeCameraStickY{0.0f};
+namespace {
+PS2Runtime::RecompiledFunction g_camMainOrig;
+constexpr uint32_t kFieldCameraYaw = 0x54EA64u;
+void camMainHook(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    auto f = [rdram](uint32_t a) { float v; std::memcpy(&v, rdram + (a & 0x01FFFFFFu), 4); return v; };
+    auto put = [rdram](uint32_t a, float v) { std::memcpy(rdram + (a & 0x01FFFFFFu), &v, 4); };
+    if (g_freeCamera.load(std::memory_order_relaxed)) {
+        float x = g_freeCameraStickX.load(std::memory_order_relaxed);
+        static const float testX = [] { const char* v = std::getenv("MAGATAMA_FREE_CAMERA_TEST"); return v ? std::strtof(v, nullptr) : 0.0f; }();
+        if (testX != 0.0f) x = testX; // diagnostic: a constant right-stick X for replays
+        constexpr float kDead = 0.18f, kDegPerFrame = 3.5f; // ~210 degrees/second at full tilt, eased near centre
+        if (std::fabs(x) > kDead) {
+            const float t = (std::fabs(x) - kDead) / (1.0f - kDead);
+            float yaw = f(kFieldCameraYaw) + (x > 0 ? 1.0f : -1.0f) * t * t * kDegPerFrame;
+            if (yaw >= 360.0f) yaw -= 360.0f;
+            if (yaw < 0.0f) yaw += 360.0f;
+            put(kFieldCameraYaw, yaw);
+        }
+    }
+    const float y0 = f(kFieldCameraYaw);
+    g_camMainOrig(rdram, ctx, runtime);
+    static const bool log = [] { const char* v = std::getenv("MAGATAMA_CAMLOG"); return v && v[0] == '1'; }();
+    static uint64_t n = 0;
+    if (log && ++n % 20 == 0) {
+        const uint8_t* st = rdram + 0x54E908u;
+        std::fprintf(stderr, "[camlog] f=%llu Y %.2f->%.2f rot292=%.2f 296=%.2f mode4=%d st24=%d stick=%u,%u,%u,%u free=%d hx=%.2f\n",
+            (unsigned long long)runtime->gate3TemporalV1().starts(), y0, f(kFieldCameraYaw), f(0x2FBF80u + 292u),
+            f(0x2FBF80u + 296u), (int)guestWord(rdram, 0x2FBF80u + 4u), (int)guestWord(rdram, 0x2FBF80u + 24u),
+            st[0], st[1], st[2], st[3], g_freeCamera.load(), g_freeCameraStickX.load());
+    }
+}
+void armFreeCamera(PS2Runtime& runtime) {
+    if (!runtime.hasFunction(0x12F718u)) throw std::runtime_error("Nocturne fldCamMain missing");
+    g_camMainOrig = runtime.lookupFunction(0x12F718u);
+    runtime.registerFunction(0x12F718u, camMainHook);
+    if (const char* v = std::getenv("MAGATAMA_FREE_CAMERA"); v && v[0] == '1') g_freeCamera.store(1);
+}
+} // namespace
+extern "C" void rrv_free_camera_set(int on) { g_freeCamera.store(on ? 1 : 0, std::memory_order_relaxed); }
+extern "C" int rrv_free_camera_active(void) { return g_freeCamera.load(std::memory_order_relaxed); }
+extern "C" void rrv_free_camera_stick(float x, float y) {
+    g_freeCameraStickX.store(x, std::memory_order_relaxed);
+    g_freeCameraStickY.store(y, std::memory_order_relaxed);
+}
+
 // The title-screen freeze waits for the game's IOP sound status. Observe the
 // EE command queue and SIF traffic without manufacturing a success response.
 namespace {
@@ -758,6 +998,17 @@ void registerPatches(PS2Runtime& runtime)
     }
     std::fprintf(stderr, "[magatama] bound %zu library entry point(s) to runtime handlers\n", bound);
 
+    if (!runtime.hasFunction(0x193478u)) {
+        runtime.registerFunction(0x193478u, nocturneCallback193478);
+    }
+
+    if (!runtime.hasFunction(0x17E2A0u))
+        runtime.registerFunction(0x17E2A0u, nocturneEffectColorCallback<0x17E2A0u, 0x50u>);
+    if (!runtime.hasFunction(0x17EAC8u))
+        runtime.registerFunction(0x17EAC8u, nocturneEffectColorCallback<0x17EAC8u, 0x58u>);
+    if (!runtime.hasFunction(0x17F3C8u))
+        runtime.registerFunction(0x17F3C8u, nocturneEffectColorCallback<0x17F3C8u, 0x60u>);
+
     runtime.registerFunction(0x2CB950u, nocturne_sceCdLayerSearchFile);
     runtime.registerFunction(0x2CCE90u, nocturne_sceSifMInitRpc);
     runtime.registerFunction(0x2CD138u, nocturne_sceSifMBindRpc);
@@ -792,6 +1043,9 @@ void registerPatches(PS2Runtime& runtime)
         armSilentSound(runtime);
         armSilentMovieAudio(runtime);
     }
+    if (const char* f448 = std::getenv("MAGATAMA_FRAME448"); f448 && f448[0] == '1') armFrame448(runtime);
+    armFreeCamera(runtime);
+    if (const char* vr = std::getenv("MAGATAMA_TRACE_VRAM"); vr && vr[0] == '1') armVramTrace(runtime);
     if (const char* snd = std::getenv("MAGATAMA_TRACE_SOUND"); snd && snd[0] == '1') {
         armSoundTrace(runtime);
     }

@@ -766,9 +766,24 @@ namespace ps2_syscalls
         if (getRegU32(ctx, 31) >= 0x2adb98u && getRegU32(ctx, 31) < 0x2ae000u) rrv::gs::Control::note('Z', getRegU32(ctx, 31), 0);
         auto info = ensureCurrentThreadInfo(ctx);
         throwIfTerminated(info);
+        // Magatama: the wakeup check and "now asleep" must be one step. A completion interrupt dispatched on
+        // another host thread (async VU1/GS owner: VIF1 DMA end -> Nocturne's sdfDrawThIntHandler) could land
+        // between them: it saw "not sleeping", banked the wakeup in wakeupCount, and the thread then slept
+        // forever (Euro save, battle transition readback in sdfGrDrawFrame). It could also see "sleeping"
+        // before the scheduler ticket existed, so its cancel found nothing to resolve. Mark the sleep under the
+        // same lock as the check, then re-check once the ticket exists.
         { std::lock_guard lock(info->m);
-          if (info->wakeupCount) { --info->wakeupCount; setReturnS32(ctx, KE_OK); return; } }
-        auto ticket = gate3Wait(ctx, runtime, TSW_SLEEP, 0);
+          if (info->wakeupCount) { --info->wakeupCount; setReturnS32(ctx, KE_OK); return; }
+          info->waitType = TSW_SLEEP; info->waitId = 0;
+          info->status = info->suspendCount ? THS_WAITSUSPEND : THS_WAIT; }
+        runtime->gate3SetWaitContextV1(ctx);
+        auto ticket = runtime->gate3Scheduler.wait(g_currentThreadId);
+        bool woken = false;
+        { std::lock_guard lock(info->m);
+          if (info->waitType != TSW_SLEEP) woken = true;                 // a waker already took us out of the sleep
+          else if (info->wakeupCount) { --info->wakeupCount; woken = true;
+                                        info->waitType = TSW_NONE; info->waitId = 0; } }
+        if (woken) runtime->gate3Scheduler.cancel(g_currentThreadId, KE_OK);
         gate3Park(ticket, runtime);
         setReturnS32(ctx, ticket->result);
     }

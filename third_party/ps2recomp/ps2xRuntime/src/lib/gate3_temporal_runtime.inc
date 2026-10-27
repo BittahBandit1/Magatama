@@ -935,6 +935,21 @@ bool PS2Runtime::gate3MmioReadV1(uint32_t address,unsigned width,uint64_t& value
                     m_memory.gs().csr|=2u; value=m_memory.gs().csr>>((physical-0x12001000u)*8);
                     if(width<8)value&=(uint64_t(1)<<(width*8))-1;
                     if(++rescues<=20||rescues%100==0)std::fprintf(stderr,"[finish-rescue] #%llu start=%llu\n",(unsigned long long)rescues,(unsigned long long)gate3TemporalV1().starts());
+                    // MAGATAMA_TRACE_RESCUE=1: dump the GS-control event ring and trace what follows the rescue.
+                    if(const char* tr=std::getenv("MAGATAMA_TRACE_RESCUE");tr&&tr[0]=='1'){
+                        const auto& k=m_memory.gsControl().counters();
+                        std::fprintf(stderr,"[finish-rescue] state csr=%llx imr=%llx finishPending=%d finishFired=%d p1=%d p2=%d p3=%d queued=%d path3Masked=%d finishes=%llu deliveries=%llu acks=%llu d1chcr=%08x d1madr=%08x d1tadr=%08x d2chcr=%08x d2qwc=%x vif1stat=%08x\n",
+                            (unsigned long long)m_memory.gs().csr,(unsigned long long)m_memory.gs().imr,(int)m_memory.gsControl().finishPending(),(int)m_memory.gsControl().finishFired(),
+                            (int)m_gifArbiter.controlPendingPath(1),(int)m_gifArbiter.controlPendingPath(2),(int)m_gifArbiter.controlPendingPath(3),(int)m_gifArbiter.controlQueued(),
+                            (int)m_memory.isPath3Masked(),(unsigned long long)k.finishes,(unsigned long long)k.finishDeliveries,(unsigned long long)k.finishAcks,
+                            m_memory.readIORegister(0x10009000u),m_memory.readIORegister(0x10009010u),m_memory.readIORegister(0x10009030u),
+                            m_memory.readIORegister(0x1000A000u),m_memory.readIORegister(0x1000A020u),m_memory.readIORegister(0x10003C00u));
+                        {   const uint32_t regs[3]={m_memory.readIORegister(0x10009030u),m_memory.readIORegister(0x10009040u),m_memory.readIORegister(0x10009050u)};
+                            const char* names[3]={"tadr","asr0","asr1"};
+                            for(int r=0;r<3;++r){ const uint32_t a=regs[r]&0x01FFFFF0u; if(a+0x40>0x02000000u) continue;
+                                for(uint32_t o=0;o<0x40;o+=16){uint32_t w[4];std::memcpy(w,m_memory.getRDRAM()+a+o,16);
+                                    std::fprintf(stderr,"[finish-rescue] %s %08x+%02x: %08x %08x %08x %08x\n",names[r],regs[r],o,w[0],w[1],w[2],w[3]);}}}
+                        rrv::gs::Control::dumpTrace();rrv::gs::Control::afterFinishTrace()=true;}
                     spin=0;
                 }
                 if(spin==200000u && reports++<20){

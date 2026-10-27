@@ -15,6 +15,9 @@
 #include "patches.h"
 #include "rrv_gs_trace_hooks.h"
 #include "nocturne_silent_sound.h"
+#if defined(MAGATAMA_SOUND_DRIVER)
+#include "../audio/nocturne_sound.h"
+#endif
 #include "ps2_runtime_macros.h"
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
@@ -679,8 +682,59 @@ void silentSoundTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtim
     } else if (entry == 0x2C1C20u &&
                g_silentSoundBanks.ready(static_cast<uint16_t>(a0 >> 16), frame)) {
         SET_GPR_U32(ctx, 2, 1u); // Nocturne's resident-bank status, observed in its query routine
+    } else if (entry == 0x2C1C20u) {
+        // Diagnostic: a status the stand-in never answers is a likely hang. Report each one polled for ~2 s.
+        static std::map<uint32_t, uint32_t> polls;
+        if (++polls[a0] == 120u)
+            std::fprintf(stderr, "[sound-silent] unanswered status query a0=%08x (bank %04x) at frame %llu ra=%08x\n",
+                         a0, unsigned(a0 >> 16), (unsigned long long)frame, ra);
+    }
+    if (entry == 0x2C10E8u && a0 == 0x1B0u && !memoryBank) {
+        // Diagnostic: a memory-buffer bank the stand-in did not recognise (it will never report ready).
+        static int reports = 0;
+        if (reports++ < 20) {
+            const auto w = [rdram](uint32_t p) { uint32_t v; p &= 0x1ffffffu; std::memcpy(&v, rdram + p, 4); return v; };
+            const uint32_t buf = w(GPR_U32(ctx, 6));
+            std::fprintf(stderr, "[sound-silent] unrecognised memory bank cmd 1B0 a2=%08x a3=%x v0=%x req=%08x/%08x/%08x "
+                         "buf=%08x hdr=%08x %08x %08x %08x .. +28=%08x frame %llu\n",
+                         GPR_U32(ctx, 6), GPR_U32(ctx, 7), GPR_U32(ctx, 2), w(0x593f20u), w(0x593f24u), w(0x593f28u),
+                         buf, w(buf), w(buf + 4), w(buf + 8), w(buf + 12), w(buf + 0x28), (unsigned long long)frame);
+        }
+    } else if (entry == 0x2C10E8u && a0 != 0xA0u && a0 != 0x1B0u) {
+        static std::map<uint32_t, int> seen;
+        if (seen[a0]++ == 0)
+            std::fprintf(stderr, "[sound-silent] first sound command %x a2=%08x a3=%x v0=%x frame %llu\n",
+                         a0, GPR_U32(ctx, 6), GPR_U32(ctx, 7), GPR_U32(ctx, 2), (unsigned long long)frame);
     }
 }
+#if defined(MAGATAMA_SOUND_DRIVER)
+// The host sound driver: sdfSndCmdTrans hands every sound command to sceSifSendCmd(cid 0). The runtime's stub
+// still runs (it only copies the optional extra block); the packet then goes to the driver, which plays it and
+// keeps the shared work area (bank status, voice map) current in EE memory. Started on the first command, when
+// guest memory and the game's own work area exist.
+PS2Runtime::RecompiledFunction g_sifSendCmdOrig;
+std::atomic<int> g_soundDriver{0}; // 0 not started, 1 running, -1 unavailable
+void soundSifSendCmd(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t cid = GPR_U32(ctx, 4), packet = GPR_U32(ctx, 5) & 0x01FFFFFFu, size = GPR_U32(ctx, 6);
+    g_sifSendCmdOrig(rdram, ctx, runtime);
+    if (cid != 0 || g_soundDriver.load() < 0) return;
+    if (g_soundDriver.load() == 0) {
+        const char* disc = std::getenv("MAGATAMA_DISC");
+        if (const char* t = std::getenv("MAGATAMA_SOUND_TRACE"); t && t[0] == '1') magatama::sound::setTrace(true);
+        g_soundDriver.store(magatama::sound::start(rdram, disc && disc[0] ? disc : ".") ? 1 : -1);
+        if (g_soundDriver.load() < 0) return;
+    }
+    if (size >= 0x14 && size <= 128 && packet + size <= 32u * 1024u * 1024u)
+        magatama::sound::post(rdram + packet, size);
+}
+bool armSoundDriver(PS2Runtime& runtime) {
+    if (!runtime.hasFunction(0x2DE2B0u)) return false;
+    g_sifSendCmdOrig = runtime.lookupFunction(0x2DE2B0u);
+    runtime.registerFunction(0x2DE2B0u, soundSifSendCmd);
+    std::fprintf(stderr, "[sound] host SDFSDMAN driver armed (sceSifSendCmd cid 0)\n");
+    return true;
+}
+#endif
 void armSilentSound(PS2Runtime& runtime) {
     for (uint32_t addr : {0x2C10E8u, 0x2C1C20u}) {
         if (!runtime.hasFunction(addr)) throw std::runtime_error("Nocturne silent sound target missing");
@@ -1039,7 +1093,13 @@ void registerPatches(PS2Runtime& runtime)
     if (const char* gfx = std::getenv("MAGATAMA_TRACE_GRAPHICS"); gfx && gfx[0] == '1') {
         armGraphicsTrace(runtime);
     }
-    if (const char* silent = std::getenv("MAGATAMA_SILENT_SOUND"); silent && silent[0] == '1') {
+    bool soundDriver = false;
+#if defined(MAGATAMA_SOUND_DRIVER)
+    if (const char* snd = std::getenv("MAGATAMA_SOUND"); snd && snd[0] == '1') soundDriver = armSoundDriver(runtime);
+#endif
+    if (soundDriver) {
+        armSilentMovieAudio(runtime); // movie audio (on-memory streams) is not driven by the host driver yet
+    } else if (const char* silent = std::getenv("MAGATAMA_SILENT_SOUND"); silent && silent[0] == '1') {
         armSilentSound(runtime);
         armSilentMovieAudio(runtime);
     }

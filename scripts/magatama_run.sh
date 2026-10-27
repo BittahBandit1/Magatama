@@ -41,6 +41,10 @@ export RRV_GATE3_REALTIME=1
 # No IOP sound driver yet: without the silent stand-in the opening movie's audio ring never drains (the movie
 # never shows) and the title screen waits on sound status. MAGATAMA_SILENT_SOUND=0 restores the old path.
 export MAGATAMA_SILENT_SOUND="${MAGATAMA_SILENT_SOUND:-1}"
+# Sound: the host SDFSDMAN driver (src/audio/nocturne_sound.cpp) plays the game's music and effects and answers
+# its bank/stream status; when it runs, the silent bank stand-in above is not used. MAGATAMA_SOUND=0 turns it off.
+export MAGATAMA_SOUND="${MAGATAMA_SOUND:-1}"
+export MAGATAMA_DISC="$disc"
 # Producer owns GS SIGNAL/FINISH/LABEL; the renderer does not generate these.
 export RRV_GS_CONTROL="${RRV_GS_CONTROL:-producer}"
 export RRV_PCSX2_GS_VSYNC=1

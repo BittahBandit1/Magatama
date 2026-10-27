@@ -1694,6 +1694,24 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             if (channelBase == 0x10009000u && (value & 1u) == 0u && qwc != 0u && g_magatamaVif1Readback) {
                 const uint32_t bytes = qwc * 16u;
                 const uint32_t dst = madr & 0x01FFFFF0u;
+                // A readback aimed at the kernel area (a null destination: seen with a Lucifer's Call save in a
+                // battle transition, 6 x 0xF000 QW from address 0) would overwrite the kernel and the game's
+                // own variables. Complete the transfer without writing; the capture then reads as black.
+                // The rest of a refused transfer (the chunks that continue it) goes the same way.
+                {   static int big = 0;
+                    if (bytes >= 0x80000u && big++ < 40)
+                        std::fprintf(stderr, "[gs-readback] chunk madr=%08x bytes=%u\n", madr, bytes); }
+                static uint32_t refusedEnd = 0xFFFFFFFFu;
+                if (dst < 0x00100000u || dst == refusedEnd) {
+                    refusedEnd = dst + bytes;
+                    rrv::gs::Control::readbackArmed() = false;
+                    static int warned = 0;
+                    if (warned++ < 4)
+                        std::fprintf(stderr, "[gs-readback] refused: destination %08x (%u bytes) is in the kernel area\n", madr, bytes);
+                    m_ioRegisters[channelBase + 0x10] = madr + bytes;
+                    completePendingTransfersV1(false, false, true);
+                    return true;
+                }
                 if (dst + bytes <= PS2_RAM_SIZE && g_magatamaVif1Readback(m_rdram + dst, bytes)) {
                     m_ioRegisters[channelBase + 0x10] = madr + bytes;
                     completePendingTransfersV1(false, false, true);
@@ -1907,7 +1925,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
-                    const int kMaxChainTags = 4096;
+                    // Magatama: Nocturne's display lists pass 4096 tags in large scenes (later areas, battle
+                    // transitions). Stopping there left a non-END tag in CHCR, which sdfGrDrawFrame reads as an IRQ
+                    // stop at a store-image packet: it then restarted the chain, waited for a FINISH that never
+                    // came and read back the GS into whatever D1_MADR held (the battle-entry freeze). The cap only
+                    // guards against a chain that loops forever.
+                    const int kMaxChainTags = 1 << 20;
                     std::vector<uint8_t> chainBuf;
 
                     const bool bootGifDmaDiag =
@@ -2138,6 +2161,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
+                        if (channelBase == 0x10009000u)   // every VIF1 chain tag (event ring 'C'): addr, tag word, asp
+                            rrv::gs::Control::note('C', currentTagAddr, (tag & 0xFFFFFFFFull) | (uint64_t(asp) << 40));
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
                         ++tagsProcessed;
 
@@ -2491,6 +2516,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 ? uint32_t(tag >> 32) & 0x7FFFFFF0u : currentTagAddr + 16u;
                             m_ioRegisters[channelBase + 0x10] = dataAddr + uint32_t(tagQwc) * 16u;
                         }
+                        if (irq && channelBase == 0x10009000u)   // which tag a VIF1 chain stopped at (event ring 'T')
+                            rrv::gs::Control::note('T', currentTagAddr, (uint64_t(id) << 32) | (uint64_t(tagQwc) << 16) | (tieEnabled ? 1u : 0u));
                         {
                             static const bool traceIrqTags = [] { const char* v = std::getenv("MAGATAMA_TRACE_IRQTAG"); return v && v[0] == '1'; }();
                             static uint64_t irqTagLines = 0;
@@ -2534,6 +2561,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                      (unsigned long long)vif0DataQw);
                     }
 
+                    if (tagsProcessed >= kMaxChainTags) {
+                        static int capped = 0;
+                        if (capped++ < 8)
+                            std::fprintf(stderr, "[dma-chain] tag cap reached on channel %08x at tadr %08x\n", channelBase, tagAddr);
+                    }
                     if (inCarCall && tagsProcessed >= kMaxChainTags)
                         terminateCarDiag(false, "tag-cap", tagAddr);
 

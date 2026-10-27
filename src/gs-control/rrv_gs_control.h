@@ -45,17 +45,17 @@ public:
     uint64_t debugCsr() const { return regs_ ? regs_[15] : 0; }
     // Last 48 FINISH-related events (any thread), dumped when a CSR poll spins.
     struct TraceEvent { uint64_t seq; char kind; uint64_t a, b; uint64_t thread; };
-    static TraceEvent* traceRing() { static TraceEvent ring[48] = {}; return ring; }
+    static TraceEvent* traceRing() { static TraceEvent ring[160] = {}; return ring; }
     static std::atomic<uint64_t>& traceSeq() { static std::atomic<uint64_t> s{0}; return s; }
     static void note(char kind, uint64_t a, uint64_t b) {
         const uint64_t n = traceSeq().fetch_add(1);
-        TraceEvent& e = traceRing()[n % 48];
+        TraceEvent& e = traceRing()[n % 160];
         e = TraceEvent{n, kind, a, b, static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xffff)};
     }
     static void dumpTrace() {
         const uint64_t n = traceSeq().load();
-        for (uint64_t i = n > 48 ? n - 48 : 0; i < n; ++i) {
-            const TraceEvent& e = traceRing()[i % 48];
+        for (uint64_t i = n > 160 ? n - 160 : 0; i < n; ++i) {
+            const TraceEvent& e = traceRing()[i % 160];
             std::fprintf(stderr, "[finish-trace] #%llu %c a=%llx b=%llx thr=%04llx\n", (unsigned long long)e.seq, e.kind,
                 (unsigned long long)e.a, (unsigned long long)e.b, (unsigned long long)e.thread);
         }

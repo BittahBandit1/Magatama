@@ -17,6 +17,7 @@ cmake -S "$repo" -B "$build" -G Ninja \
     -DRRV_BUILD_PRODUCT=ON -DRRV_PRODUCT_OWNED_SOURCE=ON -DRRV_GS_PRODUCER_CONTROL=ON \
     -DMAGATAMA_GAME=ON \
     -DRRV_PCSX2_GS_BRIDGE_MANIFEST="$bridge_manifest" \
+    -DRRV_PCSX2_SOURCE_DIR="${MAGATAMA_PCSX2_SOURCE_DIR:-$fukami/build-deps/pcsx2-2.8.2}" \
     -DFETCHCONTENT_SOURCE_DIR_SSE2NEON="$repo/build-deps/sse2neon-92f6de1"
 cmake --build "$build" --target Fukami --parallel "${1:-8}"
 print "== built: $build/candidate-bin/Fukami"

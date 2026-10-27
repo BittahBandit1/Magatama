@@ -55,7 +55,13 @@ add_dependencies(Fukami rrv-resource-package-producer)
 
 # Gate 8 audio: PCSX2 SPU2 core (tools/pcsx2-spu2) and the host rewrite of RR5's IOP sound
 # driver (src/audio). Only when the build names the pinned PCSX2 source.
-if(RRV_PCSX2_SOURCE_DIR)
+if(RRV_PCSX2_SOURCE_DIR AND MAGATAMA_GAME)
+    # Magatama: host re-implementation of Nocturne's IOP sound driver (SDFSDMAN.IRX) on the same core.
+    target_sources(Fukami PRIVATE "${CMAKE_SOURCE_DIR}/src/audio/nocturne_sound.cpp")
+    target_link_libraries(Fukami PRIVATE rrv_pcsx2_spu2)
+    target_compile_definitions(Fukami PRIVATE MAGATAMA_SOUND_DRIVER=1)
+    message(STATUS "Magatama audio: SDFSDMAN host driver, PCSX2 SPU2 from ${RRV_PCSX2_SOURCE_DIR}")
+elseif(RRV_PCSX2_SOURCE_DIR)
     target_sources(Fukami PRIVATE "${CMAKE_SOURCE_DIR}/src/audio/rspu2_driver.cpp"
         "${CMAKE_SOURCE_DIR}/src/audio/rspu2_glue.cpp")
     target_link_libraries(Fukami PRIVATE rrv_pcsx2_spu2)

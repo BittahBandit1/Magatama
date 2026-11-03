@@ -66,11 +66,11 @@ require_clean_checkout = true
 # Git tree of the locked revision with the whole bridge patch series applied (the index tree the
 # bridge manifest records as pcsx2_source.patched_tree); scripts/pcsx2_patch_series.py check
 # --pcsx2-source proves the series reproduces it.
-bridge_patched_tree = "d5f35d7e1ab9777564d59a381bdce4370cc3c647"
+bridge_patched_tree = "2b76f46531cf6b4650943e5e225a99ed863db951"
 
 [[pcsx2_bridge_patches]]
 path = "tools/patches/pcsx2-gs-bridge-target.patch"
-sha256 = "86333f08df077a5865866be6fe473dbd0e58c902bc8b021a4292a37837a4722b"
+sha256 = "207b8b9ed1a871ac8a7a221f1454fba193ceaa4a40c16337d54a6d38f97205b5"
 
 # Linux/Steam Deck only (Gate 5): applied after the target patch.
 [[pcsx2_bridge_linux_patches]]

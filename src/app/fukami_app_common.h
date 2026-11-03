@@ -11,6 +11,14 @@
 
 namespace fukami::app::detail {
 
+// The Terminal supervisor relaunches only after this process has fully exited.
+inline constexpr const char *kTerminalRestart = "MAGATAMA_RESTART_LAUNCHER";
+inline constexpr int kTerminalRestartExit = 75;
+inline bool terminalRestartEnabled() {
+    const char* value = std::getenv(kTerminalRestart);
+    return value && std::string_view(value) == "1";
+}
+
 inline constexpr const char *kChild = "RRV_FUKAMI_CHILD";     // set in the game process the launcher starts
 inline constexpr const char *kIni = "RRV_FUKAMI_INI";         // the settings file of this launch
 inline constexpr const char *kSupport = "RRV_FUKAMI_SUPPORT"; // the user's data folder

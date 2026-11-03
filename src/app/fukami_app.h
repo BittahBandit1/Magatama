@@ -29,7 +29,7 @@ std::filesystem::path iniPath();
 // this image runs from inside the app, else empty. A setting the user's file
 // does not have takes its value from here (settings::withDefaults()).
 std::filesystem::path defaultIniPath();
-// True when restart() can apply restart-required settings (app mode only).
+// True when the app or the Terminal supervisor can relaunch with saved settings.
 bool canRestart();
 // Re-executes the app so the settings file is read again. Returns only on
 // failure (or outside the app).

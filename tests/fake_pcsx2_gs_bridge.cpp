@@ -24,6 +24,9 @@ struct FakeBridge
     uint64_t completedCaptures = 0u;
     uint64_t readbacks = 0u;
     uint64_t directPresents = 0u;
+    bool originalPending = false;
+    uint64_t originalField = 0u;
+    uint32_t originalPresent = 1u;
     uint64_t unexpectedReadbacks = 0u;
     uint64_t cpuWaits = 0u;
     bool directMode = false;
@@ -460,6 +463,18 @@ TEST_EXPORT int rrv_pcsx2_gs_bridge_readback(void *bridge, uint64_t *csr,
     return 1;
 }
 
+#if !defined(RRV_TEST_OMIT_ORIGINAL_PLAN)
+TEST_EXPORT int rrv_pcsx2_gs_bridge_set_original_present_plan(void *bridge,
+    uint64_t field, uint64_t, uint32_t present, uint32_t fields, char*, uint32_t)
+{
+    auto* fake=static_cast<FakeBridge*>(bridge);
+    if (!fake || fake->originalPending || field<=fake->sequence || present>1 ||
+        (fields!=1 && fields!=2) || (fields==1 && !present)) return 0;
+    fake->originalPending=true;fake->originalField=field;fake->originalPresent=present;
+    return 1;
+}
+#endif
+
 TEST_EXPORT int rrv_pcsx2_gs_bridge_vsync(void *bridge, const uint64_t *regs,
                                           uint64_t field, uint32_t parity,
                                           char *error, uint32_t errorCapacity)
@@ -474,10 +489,13 @@ TEST_EXPORT int rrv_pcsx2_gs_bridge_vsync(void *bridge, const uint64_t *regs,
     if (!bridge || !regs || parity > 1u)
         return 0;
     auto *fake = static_cast<FakeBridge *>(bridge);
+    if (fake->originalPending && fake->originalField!=field) return 0;
+    const bool originalPresent=!fake->originalPending || fake->originalPresent!=0;
+    fake->originalPending=false;
     fake->csr = regs[15];
     fake->siglblid = regs[18];
     fake->sequence = field;
-    if (fake->directMode && fake->drawableAvailable)
+    if (fake->directMode && fake->drawableAvailable && originalPresent)
         ++fake->directPresents;
     noteEvent(6u, regs, 19u * sizeof(uint64_t));
     noteEvent(7u, &field, sizeof(field));

@@ -197,6 +197,8 @@ def main() -> int:
                         help="clean detached PCSX2 checkout at the locked revision")
     parser.add_argument("--output", required=True, type=pathlib.Path,
                         help="new or empty directory for all generated resources and manifests")
+    parser.add_argument("--toolchain-root", type=pathlib.Path,
+                        help="explicit installed Apple Metal.xctoolchain; records actual compiler commands")
     args = parser.parse_args()
 
     source = args.source.resolve()
@@ -216,9 +218,22 @@ def main() -> int:
     environment = os.environ.copy()
     module_cache = output / "clang-module-cache"
     environment["CLANG_MODULE_CACHE_PATH"] = str(module_cache)
-    metal_version = run(["xcrun", "metal", "-v"], environment=environment)
-    metallib_linker, metallib_linker_version, metallib_linker_kind = select_metallib_linker(
-        environment=environment)
+    metal_command = ["xcrun", "metal"]
+    if args.toolchain_root is not None:
+        compiler = args.toolchain_root.resolve() / "usr/metal/current/bin/metal"
+        if not compiler.is_file() or not (args.toolchain_root / "ToolchainInfo.plist").is_file():
+            raise RuntimeError("explicit Metal toolchain has no compiler or toolchain identity")
+        metal_command = [str(compiler)]
+    metal_version = run([*metal_command, "-v"], environment=environment)
+    if args.toolchain_root is None:
+        metallib_linker, metallib_linker_version, metallib_linker_kind = select_metallib_linker(
+            environment=environment)
+    else:
+        # The installed Metal compiler also supports AIR linking, as in the
+        # normal Xcode27 fallback. Do not disguise it as a metallib executable.
+        metallib_linker = metal_command
+        metallib_linker_version = metal_version
+        metallib_linker_kind = "metal-air-linker"
     toolchain = {
         "metal_version": metal_version,
         # Retain this key for consumers of schema 1.  It carries the selected
@@ -245,7 +260,7 @@ def main() -> int:
             air = air_root / library / f"{relative}.air"
             air.parent.mkdir(parents=True, exist_ok=True)
             command = [
-                "xcrun", "metal", "-ffast-math", f"-std={language}", "-target", triple,
+                *metal_command, "-ffast-math", f"-std={language}", "-target", triple,
                 f"-fmodules-cache-path={module_cache}",
                 "-o", str(air), "-c", str(patched / relative),
             ]

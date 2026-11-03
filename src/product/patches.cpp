@@ -13,10 +13,17 @@
 // Nocturne-specific fixes are added below as the boot log reveals them.
 
 #include "patches.h"
+#include "rrv_nocturne_aspect.h"
+#include "nocturne_render_pose_trace.h"
+#include "nocturne_pose_interpolation.h"
+#include "runtime/magatama_render_pose_hook.h"
+#include "rrv_nocturne_frame_trace.h"
 #include "rrv_gs_trace_hooks.h"
 #include "nocturne_silent_sound.h"
+#include "nocturne_movie_io.h"
 #if defined(MAGATAMA_SOUND_DRIVER)
 #include "../audio/nocturne_sound.h"
+#include "../audio/nocturne_native_sound.h"
 #endif
 #include "ps2_runtime_macros.h"
 #include "ps2_runtime.h"
@@ -39,6 +46,26 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+
+// Exact original instruction translations for two omitted callable routines.
+void nocturneBezierTrackSetVC(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneBezierEval(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneBezierTrackReset(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneSphereRotateMatrix(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneRingRotateMatrix(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneAiPowerMask(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneSparkOffsetScale(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneBufuIceRotateMatrix(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneBufuLightCreate(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneBufuLightCopy(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneBufuLightDelete(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneBufuLightDraw(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneFieldLightDirection(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneFieldLightAxis(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneFieldLightAnimation(uint8_t*, R5900Context*, PS2Runtime*);
+void nocturneTrackColorAcute(uint8_t*, R5900Context*, PS2Runtime*);
+
+
 
 // ── Library-import stubs without generated bodies ─────────────────────────
 struct MagatamaBoundStub { PS2Runtime::RecompiledFunction fn; const char* name; };
@@ -110,6 +137,144 @@ static void nocturneEffectColorCallback(uint8_t* rdram, R5900Context* ctx, PS2Ru
     WRITE32(ADD32(GPR_U32(ctx, 4), Offset), GPR_U32(ctx, 5));
     ctx->in_delay_slot = false;
     ctx->pc = target;
+}
+
+// Original USA draw delivery, observed after the original instructions finish.
+// The counter/queue/tag are RAM observations, never scheduling inputs.
+namespace {
+PS2Runtime::RecompiledFunction g_frameDeliveryOriginal;
+void tracedFrameDelivery(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
+    rrv::nocturne_frame_trace::Receipt r;
+    r.mode=GPR_U32(ctx,4); r.buffer=GPR_U32(ctx,5); r.half=GPR_U32(ctx,6);
+    const uint32_t slot=GPR_U32(ctx,22); // original sdfGrDrawFrame's s6, not the newer request queue
+    g_frameDeliveryOriginal(ram,ctx,runtime);
+    const auto word=[&](uint32_t address) { uint32_t v; std::memcpy(&v,ram+address,4); return v; };
+    r.field=runtime->gate3TemporalV1().starts();
+    r.kernel=word(0x54e800); r.request=word(0x551898); r.queue=word(0x551890);
+    uint16_t cadence; std::memcpy(&cadence,ram+0x54e82c,2); r.cadence=cadence;
+    if (slot>=0x5293f8 && slot<0x529428 && (slot-0x5293f8)%16==0) {
+        r.slot=(slot-0x5293f8)/16;
+        r.tag=word(slot);
+        r.count=ram[slot+8];
+    }
+    if (rrv::nocturne_frame_trace::trace().enabled())
+        rrv::nocturne_frame_trace::trace().delivered(r);
+    if(magatama::pose::interpolator().enabled()) {
+        auto finish=[r]{magatama::pose::interpolator().finish(r.mode,r.count,r.field);};
+        if(runtime->memory().ownerStreamV1())runtime->memory().ownerPostV1(std::move(finish),sizeof(r),0,false);
+        else finish();
+    }
+    runtime->noteOriginalFrameDelivery({r.field,r.kernel,r.request,r.slot,r.tag,r.mode,r.count,r.cadence});
+}
+void armOriginalFrameTrace(PS2Runtime& runtime) {
+    const char* path=std::getenv("MAGATAMA_ORIGINAL_FRAME_TRACE");
+    const char* original=std::getenv("MAGATAMA_ORIGINAL_PRESENT");
+    const char* interpolation=std::getenv("MAGATAMA_INTERPOLATE");
+    if ((!path || !*path) && !(original && std::strcmp(original,"1")==0) && !(interpolation && std::strcmp(interpolation,"60")==0)) return;
+    if (!runtime.hasFunction(0x2a9fc8)) throw std::runtime_error("Missing original USA draw delivery for trace");
+    rrv::nocturne_frame_trace::trace().open(path);
+    g_frameDeliveryOriginal=runtime.lookupFunction(0x2a9fc8);
+    runtime.registerFunction(0x2a9fc8,tracedFrameDelivery);
+    std::fprintf(stderr,"[original-frame] original draw delivery metadata; trace=%d\n", path && *path ? 1:0);
+}
+}
+
+// Bounded read-only render-packet correspondence trace. Default OFF.
+namespace {
+PS2Runtime::RecompiledFunction g_poseCamera,g_poseStart,g_poseFree,g_poseTm;
+std::vector<magatama::pose_trace::Record> g_pendingRenderPoses;
+bool g_renderPoseOverflow=false;
+void publishRenderPose(const magatama::pose_trace::Record& r){
+    magatama::pose_trace::trace().add(r);
+    if(magatama::pose::interpolator().enabled()){
+        if(g_renderPoseOverflow)return;
+        if(g_pendingRenderPoses.size()>=8192){g_pendingRenderPoses.clear();g_renderPoseOverflow=true;return;}
+        g_pendingRenderPoses.push_back(r);
+    }
+}
+uint32_t poseWord(const uint8_t* ram,uint32_t address) {
+    uint32_t n=0;if(address<=32u*1024*1024-4)std::memcpy(&n,ram+address,4);return n;
+}
+uint32_t poseAddress(uint32_t address,size_t bytes) {
+    const uint32_t a=address&0x1fffffffu;
+    return a && a<=32u*1024*1024 && bytes<=32u*1024*1024-a?a:0;
+}
+magatama::pose_trace::Record poseRecord(uint8_t* ram,PS2Runtime* rt,uint32_t kind) {
+    magatama::pose_trace::Record r;r.kind=kind;r.field=rt->gate3TemporalV1().starts();
+    r.kernel=poseWord(ram,0x54e800);r.request=poseWord(ram,0x551898);return r;
+}
+// Observe the completed original packet-building leaf at its two verified
+// model call sites. A whole recursive evaluation can yield before returning;
+// the leaf identifies both persistent and temporary packets without that assumption.
+void observeTransformPacket(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
+    const uint32_t ret=GPR_U32(c,31),packet=poseAddress(GPR_U32(c,4),128);
+    uint32_t node=0;
+    if(ret==0x2b1734u)node=poseAddress(GPR_U32(c,17),0x100);
+    if(ret==0x2b1becu && GPR_U32(c,30)>=0xc0u)node=poseAddress(GPR_U32(c,30)-0xc0u,0x100);
+    g_poseTm(ram,c,rt);
+    if(!node || !packet || c->pc!=ret)return;
+    auto r=poseRecord(ram,rt,'P');if(!magatama::pose::interpolator().enabled() && !magatama::pose_trace::Trace::window(r.field))return;
+    r.node=node;r.root=poseWord(ram,node+0x10);r.shape=poseWord(ram,node+0x38);
+    r.packet=packet;r.slot=ret;r.mode=poseWord(ram,node+0x18);r.bytes=128;
+    r.flags=std::memcmp(ram+node+0xc0,ram+packet,64)==0?1u:0u;
+    std::memcpy(r.data.data(),ram+packet,128);publishRenderPose(r);
+}
+void observeCameraPose(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
+    const uint32_t packet=poseAddress(GPR_U32(c,4),208),param=poseAddress(GPR_U32(c,5),0x90);
+    const uint32_t camera=GPR_U32(c,6),ret=GPR_U32(c,31);g_poseCamera(ram,c,rt);
+    if(!packet || !param || c->pc!=ret)return;
+    auto r=poseRecord(ram,rt,'C');r.packet=packet+16;r.node=camera;r.root=param;r.bytes=176;
+    // Original USA dds3GetActiveScene / GetActiveCameraSceneBasic layouts.
+    // Read scene/camera identity rather than interpolating across reused buffers.
+    const uint32_t gp=GPR_U32(c,28);
+    const uint32_t process=gp>=0x57acu?poseAddress(poseWord(ram,gp-0x57acu),0x1c):0;
+    const uint32_t processData=process?poseAddress(poseWord(ram,process+0x18),0xc):0;
+    const uint32_t scene=processData?poseAddress(poseWord(ram,processData+8),0x1c):0;
+    const uint32_t sceneData=scene?poseAddress(poseWord(ram,scene+0x18),0x10):0;
+    r.shape=scene;r.slot=sceneData?poseWord(ram,sceneData+0xc):0;
+    // Original battle camera director: state_change +0x28, state +0x2c.
+    // Conservatively restart continuity on either transition, even a small cut.
+    r.mode=poseWord(ram,0x320e68);r.flags=poseWord(ram,0x320e6c);
+    std::memcpy(r.data.data(),ram+packet+16,176);std::memcpy(r.data.data()+176,ram+param,32);
+    publishRenderPose(r);
+}
+void observeDrawStart(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
+    auto r=poseRecord(ram,rt,'S');r.mode=GPR_U32(c,4);r.slot=GPR_U32(c,5);
+    const uint32_t slot=poseAddress(GPR_U32(c,22),16);if(slot){r.root=slot;r.packet=poseWord(ram,slot);}
+    const uint32_t ret=GPR_U32(c,31);g_poseStart(ram,c,rt);if(c->pc!=ret)return;
+    uint16_t cadence=0;std::memcpy(&cadence,ram+0x54e82c,2);r.flags=cadence;
+    auto batch=std::move(g_pendingRenderPoses);g_pendingRenderPoses.clear();
+    const bool overflow=g_renderPoseOverflow;g_renderPoseOverflow=false;
+    const size_t charge=sizeof(r)+batch.size()*sizeof(r);
+    auto command=[r,overflow,batch=std::move(batch)]{
+        if(overflow)magatama::pose::interpolator().reset();
+        else for(const auto& pose:batch)magatama::pose::interpolator().publish(pose);
+        magatama::pose::interpolator().begin(r);magatama::pose_trace::trace().begin(r);
+    };
+    if(rt->memory().ownerStreamV1())rt->memory().ownerPostV1(std::move(command),charge,0,false);
+    else command();
+}
+void observeModelFree(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
+    auto r=poseRecord(ram,rt,'F');r.node=GPR_U32(c,4);publishRenderPose(r);g_poseFree(ram,c,rt);
+}
+void armRenderPoseTrace(PS2Runtime& rt) {
+    const char* p=std::getenv("MAGATAMA_RENDER_POSE_TRACE");
+    const char* interpolation=std::getenv("MAGATAMA_INTERPOLATE");
+    const bool enabled=interpolation && std::strcmp(interpolation,"60")==0;
+    if((!p||!*p) && !enabled)return;
+    if(enabled)magatama::pose::interpolator().configure();
+    magatama::pose_trace::trace().open(p);
+    const auto wrap=[&](uint32_t pc,PS2Runtime::RecompiledFunction& original,PS2Runtime::RecompiledFunction observed){
+        if(!rt.hasFunction(pc))throw std::runtime_error("Missing original render observer function");
+        original=rt.lookupFunction(pc);rt.registerFunction(pc,std::move(observed));};
+    wrap(0x2ba910,g_poseTm,observeTransformPacket);wrap(0x2b9e30,g_poseCamera,observeCameraPose);
+    wrap(0x2a9f90,g_poseStart,observeDrawStart);wrap(0x2b0508,g_poseFree,observeModelFree);
+    g_magatamaRenderUnpackObserver=[](uint32_t a,uint32_t cmd,uint32_t dest,const uint8_t* data,uint32_t bytes){
+        magatama::pose_trace::trace().unpack(a,cmd,dest,data,bytes);};
+    if(enabled)g_magatamaRenderUnpackTransform=[](uint32_t a,uint32_t cmd,const uint8_t* data,uint32_t bytes,uint8_t* out){
+        return magatama::pose::interpolator().unpack(a,cmd,data,bytes,out);};
+    std::fprintf(stderr,"[render-pose] correspondence trace=%d experimental60=%d; original simulation/audio clocks preserved\n",int(p&&*p),int(enabled));
+}
 }
 
 // ── RRV_FN_HITS: guest-function entry counter (default off) ───────────────
@@ -194,15 +359,23 @@ void armFnHits(PS2Runtime& runtime, const char* spec) {
             p = (*end == ',') ? end + 1 : end;
         }
     }
+    size_t armed = 0;
     for (const uint32_t addr : addrs) {
         if (!addr) continue;
-        fnHitOrig()[addr] = runtime.hasFunction(addr) ? runtime.lookupFunction(addr) : nullptr;
+        // Instrumentation must never manufacture a callable body for a missing
+        // guest function: that would hide the failure being investigated.
+        if (!runtime.hasFunction(addr)) {
+            std::fprintf(stderr, "[fn-hits] %08x absent; not instrumented\n", addr);
+            continue;
+        }
+        fnHitOrig()[addr] = runtime.lookupFunction(addr);
         (void)fnHitCount()[addr];
         (void)fnHitNs()[addr];
         runtime.registerFunction(addr, fnHitTrampoline);
+        ++armed;
     }
     std::atexit(dumpFnHits);
-    std::fprintf(stderr, "[fn-hits] armed %zu function(s)\n", addrs.size());
+    std::fprintf(stderr, "[fn-hits] armed %zu function(s)\n", armed);
 }
 } // namespace
 
@@ -265,8 +438,14 @@ static void nocturne_sceSifMUnBindRpc(uint8_t*, R5900Context* ctx, PS2Runtime* r
 // The game then sends its sound commands through sceSifSendCmd; Nocturne is silent until its driver is modelled.
 static PS2Runtime::RecompiledFunction g_sifSndInitCmdIF = nullptr;
 static void nocturne_sifSndInitCmdIF(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+#if defined(MAGATAMA_SOUND_DRIVER)
+    if (!magatama::native_sound::requested()) {
+#endif
     const uint32_t ready = 1u;
     std::memcpy(rdram + 0x59BBC0u + 31u * 4u, &ready, sizeof(ready));
+#if defined(MAGATAMA_SOUND_DRIVER)
+    }
+#endif
     g_sifSndInitCmdIF(rdram, ctx, runtime);
 }
 
@@ -293,17 +472,33 @@ int gate3TemporalWait(uint8_t*, R5900Context* ctx, PS2Runtime* runtime, std::fun
 int gate3TemporalWaitForStart(uint8_t*, R5900Context* ctx, PS2Runtime* runtime, uint64_t start);
 }
 namespace {
+extern std::FILE* g_movieTraceFile;
 std::map<uint32_t, PS2Runtime::RecompiledFunction>& cdLatencyOrig() { static std::map<uint32_t, PS2Runtime::RecompiledFunction> m; return m; }
 void cdLatencyTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
     const uint32_t entry = ctx->pc;
+    const uint32_t destination = GPR_U32(ctx, 4);
+    const uint32_t bytes = GPR_U32(ctx, 5);
+    auto& owner = runtime->gate3TemporalV1();
+    const uint64_t begin = owner.starts();
     cdLatencyOrig().at(entry)(rdram, ctx, runtime);
     // Keep the function's result and return address across the wait.
     const __m128i v0 = ctx->r[2], v1 = ctx->r[3];
     const uint32_t pc = ctx->pc;
-    auto& owner = runtime->gate3TemporalV1();
-    const uint64_t target = owner.starts() + 1;
-    // Keep the exact same one-start latency and wait
-    // result, but describe its readiness to the temporal owner explicitly.
+    const uint64_t originalEnd = owner.starts();
+    // A fixed VBlank per 16-KiB packet caps movies below 1 MiB/s, starving
+    // high-bitrate portions despite fast decoding. The open handoff still
+    // yields for handle publication. Only an established IPS stream's exact
+    // packet destination may use already-available host data without another
+    // artificial frame delay; the original reader/callback/backpressure run.
+    static const bool readAhead = [] {
+        const char* v = std::getenv("MAGATAMA_FMV_READ_AHEAD");
+        return !v || std::strcmp(v, "1") == 0;
+    }();
+    const bool packetRead = readAhead && entry == 0x2bdbd0u &&
+        magatama::movie_io::isPacketRead(rdram, GPR_U32(ctx, 28), destination, bytes);
+    const uint64_t target = originalEnd + (packetRead ? 0 : 1);
+    // Keep the existing one-start wait for all other reads/opens, describing
+    // readiness to the temporal owner without adding checkpoint polling.
     // Arbitrary waits retain their original per-checkpoint polling behavior.
     static const bool startWait = [] {
         const char* v = std::getenv("MAGATAMA_CD_START_WAIT");
@@ -314,10 +509,17 @@ void cdLatencyTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
     else
         ps2_syscalls::gate3TemporalWait(rdram, ctx, runtime, [&owner, target] { return owner.starts() >= target; });
     ctx->r[2] = v0; ctx->r[3] = v1; ctx->pc = pc;
+    if (g_movieTraceFile)
+        std::fprintf(g_movieTraceFile, "# cd %08x %llu %llu %llu %u %u\n", entry,
+                     static_cast<unsigned long long>(begin), static_cast<unsigned long long>(originalEnd),
+                     static_cast<unsigned long long>(owner.starts()), bytes, GPR_U32(ctx, 2));
 }
 void armCdLatency(PS2Runtime& runtime) {
     if (const char* v = std::getenv("MAGATAMA_CD_START_WAIT"); !(v && std::strcmp(v, "0") == 0))
         std::fprintf(stderr, "[cd-latency] modeled video-start wait enabled; one-start delay unchanged\n");
+    const char* movieReadAhead = std::getenv("MAGATAMA_FMV_READ_AHEAD");
+    if (!movieReadAhead || std::strcmp(movieReadAhead, "1") == 0)
+        std::fprintf(stderr, "[movie-io] IPS packet read-ahead enabled; archive-open/header handoff delays retained\n");
     for (const uint32_t addr : {0x2BDB80u, 0x2BDBD0u}) {
         if (!runtime.hasFunction(addr)) continue;
         cdLatencyOrig()[addr] = runtime.lookupFunction(addr);
@@ -812,6 +1014,88 @@ void armSilentMovieAudio(PS2Runtime& runtime) {
 }
 } // namespace
 
+// Read-only FMV cadence/ring trace. The original USA tick and native sound
+// provider still execute normally; no silent audio drain or timing override.
+namespace {
+PS2Runtime::RecompiledFunction g_movieTraceOrig;
+std::FILE* g_movieTraceFile = nullptr;
+std::map<uint32_t,PS2Runtime::RecompiledFunction> g_movieDmaTraceOriginals;
+thread_local unsigned g_movieDmaTraceDepth = 0;
+void movieDmaTraceRow(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime,
+                      uint32_t entry, uint32_t node, unsigned phase) {
+    const auto field = runtime->gate3TemporalV1().starts();
+    if (!g_movieTraceFile || field < 5750 || field > 6000 || !node) return;
+    node &= 0x01ffffffu;
+    const auto byte = [&](uint32_t offset) { return unsigned(ram[(node+offset)&0x01ffffffu]); };
+    const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    // RAM/context observations only: reading MMIO here would service the IPU.
+    std::fprintf(g_movieTraceFile,
+        "# ipu %u %08x %08x %lld %llu %llu %d %u %08x %08x %08x %u %u %u %u %u %u %u %u %u %u\n",
+        phase,entry,ctx->pc,static_cast<long long>(ns),static_cast<unsigned long long>(field),
+        static_cast<unsigned long long>(runtime->gate3TemporalV1().now()),rrv::guest_time::context_id,
+        g_movieDmaTraceDepth,ctx->cop0_status,GPR_U32(ctx,31),node,
+        guestWord(ram,node+0x44),guestWord(ram,node+0x48),byte(0x11),byte(0x12),byte(0x13),
+        byte(0x1a),byte(0x52),byte(0x53),byte(0x64),guestWord(ram,node+0x70));
+}
+void tracedMovieDma(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t entry=ctx->pc, gp=GPR_U32(ctx,28);
+    uint32_t node=GPR_U32(ctx,4);
+    if (entry==0x2c4b40u) node=guestWord(ram,gp-0x2018u);
+    if (entry==0x2cd750u || entry==0x2cd988u) node=guestWord(ram,gp-0x201cu);
+    if (!node) node=guestWord(ram,gp-0x2028u);
+    ++g_movieDmaTraceDepth;
+    struct Leave { ~Leave() { --g_movieDmaTraceDepth; } } leave;
+    movieDmaTraceRow(ram,ctx,runtime,entry,node,0);
+    g_movieDmaTraceOriginals.at(entry)(ram,ctx,runtime);
+    movieDmaTraceRow(ram,ctx,runtime,entry,node,1);
+}
+void tracedMovieTick(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t cadence = GPR_U32(ctx, 4);
+    g_movieTraceOrig(rdram, ctx, runtime);
+    const uint32_t gp = GPR_U32(ctx, 28);
+    const uint32_t stream = guestWord(rdram, gp - 0x2008u);
+    const uint32_t pac = stream ? guestWord(rdram, stream + 0x1cu) : 0;
+    uint32_t node = guestWord(rdram, gp - 0x2028u);
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    for (unsigned guard = 0; node && guard < 8; ++guard) {
+        auto byte = [&](uint32_t offset) { return unsigned(rdram[(node + offset) & 0x01ffffffu]); };
+        const uint32_t dims = guestWord(rdram, node + 0x3cu);
+        std::fprintf(g_movieTraceFile,
+            "%lld %llu %u %08x %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
+            static_cast<long long>(ns), static_cast<unsigned long long>(runtime->gate3TemporalV1().starts()),
+            cadence, node, dims & 0xffffu, dims >> 16, byte(0x16), byte(0x17),
+            guestWord(rdram,node+0x40u), guestWord(rdram,node+0x44u), guestWord(rdram,node+0x48u),
+            byte(0x10),byte(0x13),byte(0x1a),byte(0x52),byte(0x12),
+            pac?guestWord(rdram,pac+0x5cu):0, pac?guestWord(rdram,pac+0x64u):0,
+            pac?guestWord(rdram,pac+0x68u):0, pac?guestWord(rdram,pac+0x70u):0);
+        node = guestWord(rdram, node + 8u);
+    }
+}
+void armMovieTrace(PS2Runtime& runtime) {
+    const char* path = std::getenv("MAGATAMA_FMV_TRACE");
+    if (!path || !*path) return;
+    if (!runtime.hasFunction(0x2c4d30u)) throw std::runtime_error("Missing USA movie tick for diagnostic trace");
+    g_movieTraceFile = std::fopen(path, "w");
+    if (!g_movieTraceFile) throw std::runtime_error("Could not open FMV trace");
+    std::setvbuf(g_movieTraceFile, nullptr, _IOFBF, 65536);
+    std::fprintf(g_movieTraceFile,"# host_ns field cadence node width height fps remainder total decoded consumed phase image pending slots input_pending video_fill audio_read audio_fill audio_lead\n");
+    std::atexit([] { if (g_movieTraceFile) { std::fclose(g_movieTraceFile); g_movieTraceFile=nullptr; } });
+    g_movieTraceOrig = runtime.lookupFunction(0x2c4d30u);
+    runtime.registerFunction(0x2c4d30u, tracedMovieTick);
+    if (const char* dma=std::getenv("MAGATAMA_TRACE_FMV_DMA"); dma && std::strcmp(dma,"1")==0) {
+        for (uint32_t entry : {0x2c43e8u,0x2c4608u,0x2c47b0u,0x2c4b40u,0x2cd750u,0x2cd988u}) {
+            if (!runtime.hasFunction(entry)) throw std::runtime_error("Missing original FMV DMA diagnostic target");
+            g_movieDmaTraceOriginals[entry]=runtime.lookupFunction(entry);
+            runtime.registerFunction(entry,tracedMovieDma);
+        }
+        std::fprintf(stderr,"[fmv-trace] read-only original DMA/callback ordering, fields5750-6000\n");
+    }
+    std::fprintf(stderr,"[fmv-trace] original USA movie tick; read-only cadence/buffer diagnostics enabled\n");
+}
+} // namespace
+
 // MAGATAMA_FRAME448=1 (experiment): full-height frames. Nocturne's screen table (0x529358, 12-byte entries:
 // w, display h, buffer h, psm, zpsm, mode) gives every mode a 448-line display but a 224-line draw buffer: the game
 // renders one half-height field per vsync. FUN_002A9AA8 copies the chosen entry into the live config the buffer
@@ -1019,6 +1303,54 @@ void armSoundTrace(PS2Runtime& runtime) {
 }
 } // namespace
 
+namespace {
+PS2Runtime::RecompiledFunction g_nocturneScreenParam = nullptr;
+PS2Runtime::RecompiledFunction g_nocturneTargetCursor = nullptr;
+void nocturneTargetCursor(uint8_t* ram, R5900Context* ctx, PS2Runtime* rt) {
+    const float ratio = magatama::aspect::target.load(std::memory_order_relaxed);
+    if (ratio > 0.f && std::isfinite(ratio)) {
+        const auto scale = magatama::aspect::hudScale(ratio);
+        // nbGetUnitMarkPos already used the current main-camera projection.
+        // The sprite drawer uses 512x448 UI pixels (0x7000 + x*16,
+        // 0x7900 + y*8 in GS coordinates). Undo ONLY the HUD transform of
+        // this world anchor before the original two animated sprites draw.
+        // Their sizes still receive normal HUD scaling, preserving shape.
+        const auto anchor = [](int32_t value, float center, float scale) {
+            return int32_t(std::lround(center + (float(value)-center)/scale));
+        };
+        if (scale.x != 1.f) SET_GPR_S32(ctx, 5, anchor(GPR_S32(ctx,5),256.f,scale.x));
+        if (scale.y != 1.f) SET_GPR_S32(ctx, 6, anchor(GPR_S32(ctx,6),224.f,scale.y));
+    }
+    g_nocturneTargetCursor(ram, ctx, rt);
+}
+
+void nocturneScreenParam(uint8_t* ram, R5900Context* ctx, PS2Runtime* rt) {
+    const uint32_t param = GPR_U32(ctx, 4);
+    const float ratio = magatama::aspect::target.load(std::memory_order_relaxed);
+    // Locked USA record +04, independently used by PCSX2's official widescreen
+    // patch. Only the main scene camera: render textures/secondary UI cameras
+    // retain their own native projection. Never accumulate a scale per frame.
+    if (param != 0x2F59B0u || !(ratio > 0.f) || ratio == magatama::aspect::Original) {
+        g_nocturneScreenParam(ram, ctx, rt); return;
+    }
+    float original; std::memcpy(&original, ram + param + 4, 4);
+    const float adjusted = magatama::aspect::projectionAspect(original, ratio);
+    struct Restore { uint8_t* p; float v; ~Restore(){std::memcpy(p,&v,4);} } restore{ram+param+4,original};
+    std::memcpy(ram + param + 4, &adjusted, 4);
+    g_nocturneScreenParam(ram, ctx, rt);
+}
+void armNocturneAspect(PS2Runtime& rt) {
+    // Keep neutral wrappers installed even for a legacy off launch, so a live
+    // Escape-menu aspect change can enable projection without reloading ELF.
+    if (!rt.hasFunction(0x2BA070u)) throw std::runtime_error("Nocturne aspect requires original screen-parameter builder");
+    if (!rt.hasFunction(0x25D948u)) throw std::runtime_error("Nocturne aspect requires original battle target cursor");
+    g_nocturneScreenParam=rt.lookupFunction(0x2BA070u);
+    rt.registerFunction(0x2BA070u,nocturneScreenParam);
+    g_nocturneTargetCursor=rt.lookupFunction(0x25D948u);
+    rt.registerFunction(0x25D948u,nocturneTargetCursor);
+}
+}
+
 void registerPatches(PS2Runtime& runtime)
 {
     // Nocturne registers guest interrupt handlers (AddIntcHandler) and alarms (SetAlarm); Ridge Racer V used
@@ -1052,6 +1384,11 @@ void registerPatches(PS2Runtime& runtime)
     }
     std::fprintf(stderr, "[magatama] bound %zu library entry point(s) to runtime handlers\n", bound);
 
+    if (const char* timing=std::getenv("MAGATAMA_IPU_WORKER_TIMING"); timing && timing[0]=='1') {
+        runtime.registerFunction(0x2cd988u,ps2_stubs::sceIpuSync);
+        std::fprintf(stderr,"[ipu-worker] opt-in original64cycle worker scheduling; DMA completion unchanged\n");
+    }
+
     if (!runtime.hasFunction(0x193478u)) {
         runtime.registerFunction(0x193478u, nocturneCallback193478);
     }
@@ -1062,6 +1399,57 @@ void registerPatches(PS2Runtime& runtime)
         runtime.registerFunction(0x17EAC8u, nocturneEffectColorCallback<0x17EAC8u, 0x58u>);
     if (!runtime.hasFunction(0x17F3C8u))
         runtime.registerFunction(0x17F3C8u, nocturneEffectColorCallback<0x17F3C8u, 0x60u>);
+    // Additional missing effects observed in the 2026-10-27 battle crash log.
+    // Exact USA ELF leaves: JR RA; SW A1 at the documented object offset.
+    if (!runtime.hasFunction(0x17FC40u))
+        runtime.registerFunction(0x17FC40u, nocturneEffectColorCallback<0x17FC40u, 0x54u>);
+    if (!runtime.hasFunction(0x180BA8u))
+        runtime.registerFunction(0x180BA8u, nocturneEffectColorCallback<0x180BA8u, 0xD8u>);
+    if (!runtime.hasFunction(0x181550u))
+        runtime.registerFunction(0x181550u, nocturneEffectColorCallback<0x181550u, 0x58u>);
+    if (!runtime.hasFunction(0x181CD0u))
+        runtime.registerFunction(0x181CD0u, nocturneEffectColorCallback<0x181CD0u, 0x48u>);
+    // Exact omitted two-instruction colour handlers from the complete USA table.
+#define MAGATAMA_EFFECT_COLOR(entry, offset, index) \
+    if (!runtime.hasFunction(entry)) \
+        runtime.registerFunction(entry, nocturneEffectColorCallback<entry, offset>);
+#include "nocturne_effect_color_leaves.inc"
+#undef MAGATAMA_EFFECT_COLOR
+    if (!runtime.hasFunction(0x17CB88u))
+        runtime.registerFunction(0x17CB88u, nocturneBezierTrackReset);
+    if (!runtime.hasFunction(0x2862D0u))
+        runtime.registerFunction(0x2862D0u, nocturneAiPowerMask);
+    if (!runtime.hasFunction(0x162448u))
+        runtime.registerFunction(0x162448u, nocturneSparkOffsetScale);
+    // Original ice/light callbacks actually omitted in the Mabufu replay161255.
+    if (!runtime.hasFunction(0x192440u))
+        runtime.registerFunction(0x192440u, nocturneBufuIceRotateMatrix);
+    if (!runtime.hasFunction(0x192A70u))
+        runtime.registerFunction(0x192A70u, nocturneBufuLightCreate);
+    if (!runtime.hasFunction(0x192A80u))
+        runtime.registerFunction(0x192A80u, nocturneBufuLightCopy);
+    if (!runtime.hasFunction(0x192A90u))
+        runtime.registerFunction(0x192A90u, nocturneBufuLightDelete);
+    if (!runtime.hasFunction(0x192A98u))
+        runtime.registerFunction(0x192A98u, nocturneBufuLightDraw);
+    // Exact three small callees of the restored original Bufu light draw.
+    if (!runtime.hasFunction(0x16BE98u))
+        runtime.registerFunction(0x16BE98u, nocturneFieldLightDirection);
+    if (!runtime.hasFunction(0x16BEB8u))
+        runtime.registerFunction(0x16BEB8u, nocturneFieldLightAxis);
+    if (!runtime.hasFunction(0x16BED0u))
+        runtime.registerFunction(0x16BED0u, nocturneFieldLightAnimation);
+    // Full original acute trail-color routine, exercised by Hades Blast163029.
+    if (!runtime.hasFunction(0x1667F0u))
+        runtime.registerFunction(0x1667F0u, nocturneTrackColorAcute);
+    if (!runtime.hasFunction(0x1824C0u))
+        runtime.registerFunction(0x1824C0u, nocturneRingRotateMatrix);
+    if (!runtime.hasFunction(0x188B40u))
+        runtime.registerFunction(0x188B40u, nocturneSphereRotateMatrix);
+    if (!runtime.hasFunction(0x17CD90u))
+        runtime.registerFunction(0x17CD90u, nocturneBezierTrackSetVC);
+    if (!runtime.hasFunction(0x1AC298u))
+        runtime.registerFunction(0x1AC298u, nocturneBezierEval);
 
     runtime.registerFunction(0x2CB950u, nocturne_sceCdLayerSearchFile);
     runtime.registerFunction(0x2CCE90u, nocturne_sceSifMInitRpc);
@@ -1094,17 +1482,27 @@ void registerPatches(PS2Runtime& runtime)
         armGraphicsTrace(runtime);
     }
     bool soundDriver = false;
+    bool nativeSound = false;
 #if defined(MAGATAMA_SOUND_DRIVER)
-    if (const char* snd = std::getenv("MAGATAMA_SOUND"); snd && snd[0] == '1') soundDriver = armSoundDriver(runtime);
+    nativeSound = magatama::native_sound::install(runtime);
+    if (!nativeSound)
+        if (const char* snd = std::getenv("MAGATAMA_SOUND"); snd && snd[0] == '1') soundDriver = armSoundDriver(runtime);
 #endif
-    if (soundDriver) {
+    if (nativeSound) {
+        // Native SDFSDMAN drains the movie ring through the original EE RPC
+        // server; the silent drain must not consume its input concurrently.
+    } else if (soundDriver) {
         armSilentMovieAudio(runtime); // movie audio (on-memory streams) is not driven by the host driver yet
     } else if (const char* silent = std::getenv("MAGATAMA_SILENT_SOUND"); silent && silent[0] == '1') {
         armSilentSound(runtime);
         armSilentMovieAudio(runtime);
     }
+    armMovieTrace(runtime);
+    armOriginalFrameTrace(runtime);
+    armRenderPoseTrace(runtime);
     if (const char* f448 = std::getenv("MAGATAMA_FRAME448"); f448 && f448[0] == '1') armFrame448(runtime);
     armFreeCamera(runtime);
+    armNocturneAspect(runtime);
     if (const char* vr = std::getenv("MAGATAMA_TRACE_VRAM"); vr && vr[0] == '1') armVramTrace(runtime);
     if (const char* snd = std::getenv("MAGATAMA_TRACE_SOUND"); snd && snd[0] == '1') {
         armSoundTrace(runtime);

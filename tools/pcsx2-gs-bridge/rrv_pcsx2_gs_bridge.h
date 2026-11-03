@@ -246,6 +246,14 @@ RRV_PCSX2_GS_BRIDGE_API int rrv_pcsx2_gs_bridge_vsync(
     RrvPcsx2GsBridge* bridge, const RrvPcsx2GsPrivRegs regs,
     uint64_t field_index, uint32_t field_parity, char* error, uint32_t error_capacity);
 
+// Optional original-content presentation extension (direct Metal). An owned
+// plan must be consumed by exactly the following vsync field. It changes only
+// host presentation: every GS field, merge, draw and feedback pass still runs.
+// fields_per_present is 1 or 2; fields=2 is valid only in progressive full mode.
+RRV_PCSX2_GS_BRIDGE_API int rrv_pcsx2_gs_bridge_set_original_present_plan(
+    RrvPcsx2GsBridge* bridge, uint64_t field_index, uint64_t source_generation,
+    uint32_t present, uint32_t fields_per_present, char* error, uint32_t error_capacity);
+
 // Optional M2 diagnostic exports. They exist only when the bridge is built
 // with RRV_PCSX2_GS_CANONICAL_RECEIPTS; the runtime resolves them dynamically
 // so the stable ABI and production bridge remain unchanged in mode A.
@@ -305,7 +313,7 @@ RRV_PCSX2_GS_BRIDGE_API int rrv_pcsx2_gs_bridge_resize(
 // EndPresent -> RenderImGui). With no callback registered (headless, a host
 // without a menu, or a snapshot-only bridge) the bridge does no overlay work.
 // Nothing here reads or writes GS registers, local memory, CSR or the GIF and
-// field streams; the set_* options change presentation only.
+// field streams; settings change host rendering/presentation, preserving guest state.
 enum {
     // Keys for RrvPcsx2GsBridgeUi.add_key (mapped to ImGuiKey_* in the bridge).
     RRV_PCSX2_GS_UI_KEY_TAB = 1,
@@ -384,6 +392,13 @@ typedef struct RrvPcsx2GsBridgeUi {
     void (*set_integer_scaling)(int enabled);
     void (*set_fxaa)(int enabled);
     int (*set_cas)(int sharpness); // 0 = off, 1..100
+    // Optional tail. Queue validated renderer settings on the GS owner; apply
+    // after the current present, preserving the running game and GS memory.
+    // keys: scale, aa1, aniso, texture_filter, sprite_filter, mipmap.
+    int (*set_render_option)(const char* key, const char* value);
+    // Actual renderer values on this owner, including clamped scale. Returned
+    // text is valid until the next query; nullptr means unsupported key.
+    const char* (*get_render_option)(const char* key);
 } RrvPcsx2GsBridgeUi;
 
 typedef void (*RrvPcsx2GsBridgeOverlayFrame)(void* context, const RrvPcsx2GsBridgeUi* ui);

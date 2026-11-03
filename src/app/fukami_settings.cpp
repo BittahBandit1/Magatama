@@ -257,13 +257,20 @@ bool IniDocument::save(const std::filesystem::path &path) const
 const std::vector<Spec> &schema()
 {
     static const std::vector<Spec> specs = {
+        // [audio] applies to host output without stopping native synthesis.
+        {"audio", "volume", "Volume (%)", "Overall game volume. Applies immediately.",
+         Kind::integer, "100", {}, 0, 100, Apply::live},
+        {"audio", "mute", "Mute", "Silence the game. Unmute restores your volume setting.",
+         Kind::boolean, "false", {}, 0, 0, Apply::live},
         // [display]
         {"display", "ratio", "Widescreen", "Real widescreen: the game renders a wider view. 4:3 is the stock game.",
          Kind::choice, "16:9", {"4:3", "16:9", "16:10", "21:9"}, 0, 0, Apply::restart, false}, // Magatama: RR5 camera patch
         {"display", "hud", "HUD", "How 2D (HUD, menus, text) shows on a wide picture.",
          Kind::choice, "race", {"stretch", "fixed", "race"}, 0, 0, Apply::restart, false}, // Magatama: RR5 HUD
-        {"display", "aspect", "Picture fit", "How the picture fits the window. Empty follows Widescreen.",
-         Kind::choice, "", {"", "auto", "4:3", "16:9", "16:10", "21:9", "stretch"}, 0, 0, Apply::live},
+        {"display", "nocturne_aspect", "Aspect ratio", "World view ratio. Automatic follows the window; HUD stays centered at original proportions.",
+         Kind::choice, "4:3", {"4:3", "auto", "16:9", "16:10", "21:9", "32:9"}, 0, 0, Apply::live},
+        {"display", "aspect", "Picture fit", "Legacy presentation fit; Nocturne uses Aspect ratio instead.",
+         Kind::choice, "", {"", "auto", "4:3", "16:9", "16:10", "21:9", "32:9", "stretch"}, 0, 0, Apply::live, false},
         {"display", "window", "Window size", "Starting window size, WIDTHxHEIGHT. Empty is automatic.",
          Kind::size, "", {}, 0, 0, Apply::restart, false},
         {"display", "fullscreen", "Fullscreen", "Fill the screen. Also F11 or Cmd+Ctrl+F.",
@@ -310,10 +317,10 @@ const std::vector<Spec> &schema()
         // [rendering]
         {"rendering", "render_mode", "Render mode", "full: progressive full frames. field: the older half-height output.",
          Kind::choice, "full", {"full", "field"}},
-        {"rendering", "scale", "Internal resolution", "Rendering scale (full mode). Higher is sharper and slower.",
-         Kind::integer, "4", {}, 1, 8},
+        {"rendering", "scale", "Rendering resolution", "Internal rendering scale: 1x native through 8x. Higher is sharper and uses more GPU memory.",
+         Kind::integer, "4", {}, 1, 8, Apply::live},
         {"rendering", "aa1", "Edge anti-aliasing (AA1)", "PCSX2's emulation of the PS2's AA1 edge smoothing.",
-         Kind::boolean, "true"},
+         Kind::boolean, "true", {}, 0, 0, Apply::live},
         {"rendering", "fxaa", "FXAA", "Smooths jagged edges on the finished picture.",
          Kind::boolean, "true", {}, 0, 0, Apply::live},
         {"rendering", "cas", "Sharpening (CAS)", "Sharpen the finished picture, 0 = off.",
@@ -323,21 +330,21 @@ const std::vector<Spec> &schema()
         {"rendering", "metal_hud", "Metal HUD", "Apple's performance overlay: FPS, GPU time, memory.",
          Kind::boolean, "true", {}, 0, 0, Apply::live},
         {"rendering", "aniso", "Anisotropic filtering", "Keeps textures at steep angles sharp.",
-         Kind::choice, "0", {"0", "2", "4", "8", "16"}},
+         Kind::choice, "0", {"0", "2", "4", "8", "16"}, 0, 0, Apply::live},
         // Host enhancement (PCSX2 "Bilinear (Forced excluding sprite)"). RR5 asks for point sampling on its car
         // textures only (TEX1 MMAG=NEAREST), so this is what smooths the cars; 2D sprites keep the game's filter.
         {"rendering", "texture_filter", "Texture filtering",
          "PS2: as the game asks. Bilinear: smooths every 3D texture.",
-         Kind::choice, "ps2", {"ps2", "bilinear"}},
+         Kind::choice, "ps2", {"ps2", "bilinear"}, 0, 0, Apply::live},
         // Host enhancement, on by default (owner request 2026-10-12; docs/TESTING.md T-SPRITE-COVERAGE). RR5 draws
         // its 2D as point-sampled sprites, which come out even only when a texel covers a whole number of output
         // pixels; `even` weights the texels under each output pixel instead (PCSX2 patch 0013).
         {"rendering", "sprite_filter", "2D filtering",
          "Even: HUD, menus, text and logos keep even pixels at every resolution. PS2: one texture pixel per screen pixel.",
-         Kind::choice, "even", {"even", "ps2"}},
+         Kind::choice, "even", {"even", "ps2"}, 0, 0, Apply::live},
         // Off by default (owner, 2026-10-12): at the internal scales this is played at, the smaller copies only blur.
         {"rendering", "mipmap", "Mipmaps", "Emulate the PS2's mipmaps (on is what the hardware does).",
-         Kind::boolean, "false"},
+         Kind::boolean, "false", {}, 0, 0, Apply::live},
         // Windows only (the other platforms have one graphics API): auto is Direct3D 11, the API whose frame pacing
         // can be controlled and measured there (docs/TESTING.md "Windows frame pacing"). In the menu on Windows.
         {"rendering", "backend", "Graphics API",
@@ -447,6 +454,36 @@ bool steamDeck()
 #endif
 }
 
+std::vector<std::pair<std::string,std::string>> magatamaSavedEnvironment(const IniDocument& doc)
+{
+    struct Binding { const char* section; const char* key; const char* env; bool boolean; };
+    static constexpr Binding bindings[] = {
+        {"display","fullscreen","RRV_WINDOW_FULLSCREEN",true},
+        {"display","integer_scaling","RRV_PCSX2_GS_INTEGER_SCALING",true},
+        {"display","present_pacing","RRV_PCSX2_GS_PRESENT_PACING",true},
+        {"rendering","render_mode","RRV_GS_RENDER_MODE",false},
+        {"rendering","aa1","RRV_PCSX2_GS_FULL_HWAA1",true},
+        {"rendering","fxaa","RRV_PCSX2_GS_FXAA",true},
+        {"rendering","cas","RRV_PCSX2_GS_CAS",false},
+        {"rendering","metal_hud","MTL_HUD_ENABLED",true},
+        {"rendering","aniso","RRV_PCSX2_GS_ANISO",false},
+        {"rendering","texture_filter","RRV_PCSX2_GS_TEXTURE_FILTER",false},
+        {"rendering","sprite_filter","RRV_PCSX2_GS_SPRITE_FILTER",false},
+        {"rendering","mipmap","RRV_PCSX2_GS_FULL_HWMIPMAP",true},
+        {"input","analog","RRV_PAD_ANALOG",true},
+        {"input","rumble","RRV_PAD_RUMBLE",true},
+        {"timing","split_gs","RRV_VU1GS_SPLIT",true},
+        {"timing","pacer_spin","RRV_GATE3_REALTIME_SPIN_MS",false},
+    };
+    std::vector<std::pair<std::string,std::string>> result;
+    for(const auto& b:bindings) {
+        const auto saved=doc.get(b.section,b.key);const auto* spec=find(b.section,b.key);
+        if(saved && spec && valid(*spec,*saved))
+            result.emplace_back(b.env,b.boolean ? (boolValue(*saved)?"1":"0") : *saved);
+    }
+    return result;
+}
+
 int hostScale(int scale, bool deck) { return deck && scale > 1 && (scale & 1) ? scale - 1 : scale; }
 
 bool valid(const Spec &spec, std::string_view value)
@@ -458,6 +495,8 @@ bool valid(const Spec &spec, std::string_view value)
         return value.size() == 1 && value[0] >= '1' && value[0] <= '8';
     if (key == "cas")
         return matches(value, "[0-9]+") && std::stoll(std::string(value).substr(0, 18)) <= 100;
+    if (spec.section == "audio" && key == "volume")
+        return value.size() <= 3 && matches(value, "[0-9]+") && std::stoi(std::string(value)) <= 100;
     if (key == "car_lod")
         return matches(value, "[0-9]+([.][0-9]+)?");
     if (key == "draw_distance")
@@ -522,8 +561,9 @@ const std::map<std::string, std::string> &messages()
 {
     static const std::map<std::string, std::string> table = {
         {"ratio", "ratio must be 4:3, 16:9, 16:10 or 21:9"},
+        {"nocturne_aspect", "nocturne_aspect must be auto, 4:3, 16:9, 16:10, 21:9 or 32:9"},
         {"hud", "hud must be fixed, race or stretch"},
-        {"aspect", "aspect must be empty, auto, 4:3, 16:9, 16:10, 21:9 or stretch"},
+        {"aspect", "aspect must be empty, auto, 4:3, 16:9, 16:10, 21:9, 32:9 or stretch"},
         {"window", "window must be empty or WIDTHxHEIGHT, e.g. 1920x1080"},
         {"render_mode", "render_mode must be full or field"},
         {"backend", "backend must be auto, vulkan or d3d11 (d3d11: Windows only)"},
@@ -531,6 +571,7 @@ const std::map<std::string, std::string> &messages()
         {"vrr", "vrr must be auto, on or off"},
         {"scale", "scale must be 1 to 8"},
         {"cas", "cas must be 0 to 100 (0 = off)"},
+        {"volume", "volume must be 0 to 100 (%)"},
         {"aniso", "aniso must be 0, 2, 4, 8 or 16"},
         {"texture_filter", "texture_filter must be ps2 or bilinear"},
         {"sprite_filter", "sprite_filter must be even or ps2"},

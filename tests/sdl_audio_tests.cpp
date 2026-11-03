@@ -1,4 +1,5 @@
 #include "rrv_sdl_audio.h"
+#include "rrv_audio_output.h"
 #include <SDL.h>
 #include <algorithm>
 #include <cmath>
@@ -14,6 +15,32 @@ int main(int argc, char** argv)
     using namespace rrv::audio;
     CHECK(!ready());
     shutdown();
+    if (argc > 1 && std::strcmp(argv[1], "--muted") == 0)
+    {
+        setenv("MAGATAMA_TEST_MUTE", "1", 1);
+        initialize();
+        CHECK(ready());
+        pauseForTesting();
+        armOutputProbeForTesting();
+        size_t consumed = 0;
+        setStreamSource([](void* user, float* output, size_t frames) {
+            *static_cast<size_t*>(user) += frames;
+            std::fill_n(output, frames * 2, 0.75f);
+            return frames;
+        }, &consumed);
+        const int16_t pcm[4] = {16384, 16384, 16384, 16384};
+        auto sound = createMonoSound(pcm, 4, sampleRateForTesting(), 1, 1);
+        CHECK(sound);
+        play(sound);
+        float output[128];
+        mixForTesting(output, 64);
+        CHECK(consumed == 64 && !playing(sound));
+        CHECK(firstOutputProbeSampleForTesting() > 0.75f); // mixed PCM observed before forced test mute
+        CHECK(std::all_of(std::begin(output), std::end(output), [](float x) { return x == 0; }));
+        shutdown();
+        std::puts("Muted output still consumes native stream and completes sounds");
+        return 0;
+    }
     if (argc > 1 && std::strcmp(argv[1], "--failure") == 0)
     {
         initialize();
@@ -84,6 +111,33 @@ int main(int argc, char** argv)
     CHECK(!createMonoSound(nullptr, 64, rate, 1, 1));
     CHECK(!createMonoSound(pcm.data(), 0, rate, 1, 1));
     CHECK(!createMonoSound(pcm.data(), 64, 0, 1, 1));
+
+    // Master controls act after stream consumption. Muting/zero volume must
+    // not stop the native driver's ring or lose the user's chosen volume.
+    size_t consumed = 0;
+    setStreamSource([](void* user, float* output, size_t frames) {
+        *static_cast<size_t*>(user) += frames;
+        for (size_t i = 0; i < frames; ++i) {
+            output[2*i] = 0.8f; output[2*i+1] = -0.4f;
+        }
+        return frames;
+    }, &consumed);
+    setOutputVolume(50);
+    mixForTesting(out.data(), 64);
+    CHECK(consumed == 64 && std::abs(out[0] - 0.4f) < 0.00001f && std::abs(out[1] + 0.2f) < 0.00001f);
+    setOutputMuted(true);
+    mixForTesting(out.data(), 64);
+    CHECK(consumed == 128 && outputVolume() == 50);
+    CHECK(std::all_of(out.begin(), out.end(), [](float x) { return x == 0; }));
+    setOutputVolume(25); setOutputMuted(false);
+    mixForTesting(out.data(), 64);
+    CHECK(consumed == 192 && std::abs(out[0] - 0.2f) < 0.00001f && std::abs(out[1] + 0.1f) < 0.00001f);
+    setOutputVolume(0);
+    mixForTesting(out.data(), 64);
+    CHECK(consumed == 256 && std::all_of(out.begin(), out.end(), [](float x) { return x == 0; }));
+    setOutputVolume(-1); CHECK(outputVolume() == 0);
+    setOutputVolume(101); CHECK(outputVolume() == 100);
+    setStreamSource(nullptr, nullptr);
 
     play(first);
     shutdown();

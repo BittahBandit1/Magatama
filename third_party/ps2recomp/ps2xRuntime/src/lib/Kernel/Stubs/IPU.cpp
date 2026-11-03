@@ -1,9 +1,13 @@
 #include "Common.h"
 #include "IPU.h"
+#include "runtime/rrv_ipu_worker_timing.h"
+#include "runtime/rrv_nocturne_ipu_sync.h"
 #include <cstdlib>
 #include <stdexcept>
 
 namespace ps2_syscalls { void magatamaDeliverDeferredDmac(uint8_t* rdram, PS2Runtime* runtime); }
+
+namespace ps2_syscalls {void magatamaDeferDmacCause(uint32_t);}
 
 namespace ps2_stubs
 {
@@ -80,6 +84,14 @@ namespace ps2_stubs
         mem.write32(REG_IPU_CTRL, 0x40000000u);
         mem.write32(REG_IPU_CMD, 0u);
 
+        if (nocturne && std::getenv("MAGATAMA_IPU_WORKER_TIMING") && std::getenv("MAGATAMA_IPU_WORKER_TIMING")[0]=='1') {
+            rrv::ipu_worker_timing::configure([runtime](uint64_t cycles,std::function<void()> commit) {
+                static uint64_t sequence=uint64_t{1}<<62;
+                auto& owner=runtime->gate3TemporalV1();
+                owner.Admit({owner.now()+cycles,sequence++,std::move(commit)});
+            },[](unsigned cause){ps2_syscalls::magatamaDeferDmacCause(cause);});
+        }
+
         setReturnS32(ctx, 0);
     }
 
@@ -130,6 +142,10 @@ namespace ps2_stubs
     void sceIpuSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (runtime && std::getenv("MAGATAMA_IPU") && std::getenv("MAGATAMA_IPU")[0]=='1') {
+            if (std::getenv("MAGATAMA_IPU_WORKER_TIMING") && std::getenv("MAGATAMA_IPU_WORKER_TIMING")[0]=='1') {
+                rrv::ipu_timing::syncOriginal(rdram,ctx,runtime);
+                return;
+            }
             auto& mem=runtime->memory();
             const bool poll=getRegU32(ctx,4)==1;
             for(unsigned i=0;i<(poll?1u:1048576u);++i) {

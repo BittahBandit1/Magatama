@@ -77,6 +77,10 @@ struct Spec
 };
 
 const std::vector<Spec> &schema();
+// Explicit saved controls for Magatama's Terminal startup. No RR5 camera/HUD,
+// workload, card, logging or diagnostic defaults are translated here.
+std::vector<std::pair<std::string,std::string>> magatamaSavedEnvironment(const IniDocument& doc);
+
 // True on a Steam Deck (Linux, DMI board vendor Valve); RRV_STEAM_DECK=0/1 overrides it (tests).
 bool steamDeck();
 // The internal scale a host can use: on a Steam Deck an odd scale above 1 becomes the even one below it. The

@@ -32,5 +32,7 @@ void setStreamSource(StreamPull pull, void* user);
 void pauseForTesting();
 void mixForTesting(float* stereo, size_t frames);
 int sampleRateForTesting();
+void armOutputProbeForTesting();
+float firstOutputProbeSampleForTesting();
 #endif
 }

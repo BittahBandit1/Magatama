@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "rrv_gs_render_mode.h"
+#include "rrv_nocturne_original_frame.h"
 
 namespace rrv::m2neutral { struct ConsumerBoundaryOrdering; }
 
@@ -258,6 +259,10 @@ namespace rrv::gsbackend
         // (presentationStats() holds the producer mutex while it waits for the
         // GS thread).
         uint64_t fieldTransitionCount() const { return m_fieldTransitions.load(std::memory_order_relaxed); }
+        bool originalPresentationRequested() const { return m_originalPresentation != nullptr; }
+        // Called through the runtime's existing VU/GS owner stream, after the
+        // original draw delivery. Owned metadata follows every earlier packet.
+        void noteOriginalFrameDelivery(const magatama::original_frame::Delivery& delivery);
 
         // Gate-4 VU1+GS owner stream (docs/evidence/GATE4_VU1_GS_WORKER_DESIGN_2026-09-25.md
         // S2/S3). Available only with the GS worker (RRV_GS_EXECUTION=worker-sync).
@@ -421,6 +426,10 @@ namespace rrv::gsbackend
         DestroyFn m_destroy = nullptr;
         SubmitFn m_submit = nullptr;
         VsyncFn m_vsync = nullptr;
+        struct OriginalPresentation;
+        std::unique_ptr<OriginalPresentation> m_originalPresentation;
+        bool applyOriginalPresentation(uint64_t field, char* error, uint32_t capacity);
+        void recordOriginalPresentation(uint64_t field);
         SnapshotFn m_snapshot = nullptr;
         ResizeFn m_resize = nullptr;
         CaptureFn m_capture = nullptr;

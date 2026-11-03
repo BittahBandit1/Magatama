@@ -3,6 +3,9 @@
 
 #include "fukami_app.h"
 #include "fukami_settings.h"
+#include "../gs-backend/rrv_nocturne_aspect.h"
+#include "../host/rrv_audio_output.h"
+#include <cstring>
 
 // The bridge ABI header is plain C with no PCSX2 types; the host only uses its
 // UI table and key codes (the bridge itself is loaded at run time).
@@ -33,10 +36,11 @@ std::string id(std::string_view section, std::string_view key)
 
 // [timing] holds the host speed switches the menu shows (split_gs, pacer_spin); its other keys are ini only.
 // "experimental" is not an ini section: it is the page of the specs marked experimental, whatever their section.
-constexpr std::string_view kSections[] = {"display", "rendering", "input", "game", "timing", "experimental"};
+constexpr std::string_view kSections[] = {"audio", "display", "rendering", "input", "game", "timing", "experimental"};
 
 const char *sectionTitle(std::string_view section)
 {
+    if (section == "audio") return "Audio";
     if (section == "display") return "Display";
     if (section == "rendering") return "Rendering";
     if (section == "input") return "Input";
@@ -46,8 +50,17 @@ const char *sectionTitle(std::string_view section)
     return "Other";
 }
 
+bool availableInMenu(const settings::Spec& spec)
+{
+    // The Terminal supervisor always keeps the diagnostic log. This switch
+    // controls the packaged app's session folder only.
+    return spec.inMenu && !(spec.section=="game" && spec.key=="logging" && !app::inApp());
+}
+
 std::string choiceName(const settings::Spec &spec, std::string_view choice)
 {
+    if (spec.key == "nocturne_aspect" && choice == "auto")
+        return "Automatic (window)";
     if (spec.key == "aspect" && choice.empty())
         return "Same as Widescreen";
     if (choice.empty())
@@ -101,10 +114,12 @@ bool isBackKey(const Input &input)
 
 bool appliesLive(std::string_view section, std::string_view key)
 {
-    // fullscreen: the host toggles the window. The others are presentation
-    // options the bridge changes between two fields (RrvPcsx2GsBridgeUi set_*).
-    return (section == "display" && (key == "fullscreen" || key == "aspect" || key == "integer_scaling")) ||
-           (section == "rendering" && (key == "fxaa" || key == "cas" || key == "metal_hud"));
+    // Host/window controls and serialized bridge renderer updates. No live
+    // setting requests a game restart or changes original guest timing.
+    return (section == "display" && (key == "fullscreen" || key == "aspect" || key == "integer_scaling" || key == "nocturne_aspect")) ||
+           (section == "audio" && (key == "volume" || key == "mute")) ||
+           (section == "rendering" && (key == "fxaa" || key == "cas" || key == "metal_hud" || key == "scale" || key == "aa1" || key == "aniso" ||
+                                         key == "texture_filter" || key == "sprite_filter" || key == "mipmap"));
 }
 
 Menu::Menu(std::filesystem::path ini, const std::filesystem::path &defaults) :
@@ -123,7 +138,34 @@ Menu::Menu(std::filesystem::path ini, const std::filesystem::path &defaults) :
         const char *hud = std::getenv("MTL_HUD_ENABLED");
         m_launch[id("rendering", "metal_hud")] = (hud && hud[0] == '1') ? "true" : "false";
     }
+    // Magatama Terminal defaults intentionally differ from legacy RR5/app
+    // schema defaults. Show the resolved running controls, not a fictional
+    // default (e.g. split=true/mipmap=false when the runtime uses the reverse).
+    if (std::getenv("MAGATAMA_DISC")) {
+        const auto c=settings::LaunchConfig::fromEnvironment([](const char* name){return std::getenv(name);});
+        const auto boolean=[&](const char* section,const char* key,bool v){m_launch[id(section,key)]=v?"true":"false";};
+        boolean("display","fullscreen",c.fullscreen);
+        boolean("display","integer_scaling",c.integerScaling);
+        boolean("display","present_pacing",c.presentPacing);
+        m_launch[id("rendering","render_mode")]=c.renderMode;
+        boolean("rendering","aa1",c.aa1);boolean("rendering","fxaa",c.fxaa);
+        m_launch[id("rendering","cas")]=std::to_string(c.cas);
+        m_launch[id("rendering","aniso")]=std::to_string(c.aniso);
+        m_launch[id("rendering","texture_filter")]=c.textureFilter;
+        m_launch[id("rendering","sprite_filter")]=c.spriteFilter;
+        boolean("rendering","mipmap",c.mipmap);
+        boolean("input","analog",c.analog);boolean("input","rumble",c.rumble);
+        boolean("timing","split_gs",c.splitGs);
+        m_launch[id("timing","pacer_spin")]=std::to_string(c.pacerSpinMs);
+    }
+    // Show the actual launch overrides, including Terminal's 8x default.
+    if (const char* scale = std::getenv("RRV_PCSX2_GS_FULL_SCALE"); scale && *scale)
+        m_launch[id("rendering", "scale")] = scale;
+    if (const char* aspect = std::getenv("MAGATAMA_ASPECT"); aspect && *aspect)
+        m_launch[id("display", "nocturne_aspect")] = std::string(aspect) == "off" ? "4:3" : aspect;
     m_values = m_launch;
+    rrv::audio::setOutputVolume(static_cast<int>(toLong(m_values[id("audio", "volume")], 100)));
+    rrv::audio::setOutputMuted(settings::boolValue(m_values[id("audio", "mute")]));
     // The picture fit that an empty `aspect` stands for is the ratio this
     // process was launched with (run_gate4_product.sh: aspect defaults to it;
     // RRV_RR5_WIDESCREEN is set only for ratios other than 4:3).
@@ -182,12 +224,14 @@ void Menu::fullscreenChanged(bool fullscreen, bool persist)
 
 void Menu::frameCallback(void *menu, const RrvPcsx2GsBridgeUi *ui)
 {
-    if (!menu || !ui || ui->struct_size < sizeof(RrvPcsx2GsBridgeUi))
+    if (!menu || !ui || ui->struct_size < offsetof(RrvPcsx2GsBridgeUi, set_render_option))
         return;
     // Never unwind into the bridge (built without exceptions).
     try
     {
-        static_cast<Menu *>(menu)->frame(*ui);
+        RrvPcsx2GsBridgeUi supported{};
+        std::memcpy(&supported, ui, std::min<size_t>(ui->struct_size, sizeof(supported)));
+        static_cast<Menu *>(menu)->frame(supported);
     }
     catch (...)
     {
@@ -209,11 +253,80 @@ void Menu::reload()
     // What the next launch would use: a setting the file does not have follows the app's default ini.
     const settings::IniDocument shown = settings::withDefaults(*doc, m_defaults);
     for (const settings::Spec &spec : settings::schema())
-        m_values[id(spec.section, spec.key)] = settings::value(shown, spec);
+    {
+        const auto key = id(spec.section, spec.key);
+        // Missing controls follow this process's effective defaults. A saved
+        // choice remains visible as the requested value after menu changes.
+        m_values[key] = appliesLive(spec.section,spec.key) ? m_launch[key] :
+            (shown.get(spec.section,spec.key) ? settings::value(shown,spec) : m_launch[key]);
+    }
+}
+
+// Bounded Terminal-agent check: call the production setting handler without
+// fabricating OS input, opening a menu, changing guest scripts or saving a card.
+// The launcher isolates the ini for these explicitly requested test runs.
+void Menu::runDiagnostic(const RrvPcsx2GsBridgeUi& ui)
+{
+    const char* mode=std::getenv("MAGATAMA_MENU_TEST");
+    if (!mode || (std::strcmp(mode,"resolution") && std::strcmp(mode,"rendering") && std::strcmp(mode,"audit") && std::strcmp(mode,"audio"))) return;
+    ++m_diagnosticFrame;
+    struct Step { uint64_t frame; const char* section; const char* key; const char* value; };
+    static constexpr Step resolution[] = {
+        {1400,"rendering","scale","1"}, {1500,"rendering","scale","2"},
+        {1600,"rendering","scale","4"}, {1700,"rendering","scale","8"},
+        {1800,"rendering","scale","3"}};
+    static constexpr Step rendering[] = {
+        {1450,"rendering","aa1","false"}, {1650,"rendering","aa1","true"},
+        {1850,"rendering","aniso","0"}, {1950,"rendering","aniso","16"},
+        {2050,"rendering","texture_filter","ps2"}, {2150,"rendering","texture_filter","bilinear"},
+        {2250,"rendering","sprite_filter","ps2"}, {2350,"rendering","sprite_filter","even"},
+        {2450,"rendering","mipmap","true"}, {2550,"rendering","mipmap","false"},
+        {2650,"display","nocturne_aspect","16:9"}, {2850,"display","nocturne_aspect","4:3"},
+        {3050,"display","nocturne_aspect","21:9"}, {3150,"display","nocturne_aspect","32:9"},
+        {3250,"display","nocturne_aspect","auto"},
+        {3450,"rendering","fxaa","false"}, {3550,"rendering","fxaa","true"},
+        {3650,"rendering","cas","50"}, {3750,"rendering","cas","0"}};
+    static constexpr Step audit[] = {
+        {1400,"display","present_pacing","false"}, {1500,"rendering","render_mode","field"},
+        {1600,"input","analog","false"}, {1700,"input","rumble","false"},
+        {1800,"timing","split_gs","true"}, {1900,"timing","pacer_spin","1"}};
+    static constexpr Step audio[] = {
+        {600,"audio","volume","50"}, {660,"audio","mute","true"},
+        {720,"audio","volume","25"}, {780,"audio","mute","false"},
+        {840,"audio","volume","0"}, {900,"audio","volume","100"}};
+    const bool scales=std::strcmp(mode,"resolution")==0;
+    const bool startup=std::strcmp(mode,"audit")==0;
+    const bool sound=std::strcmp(mode,"audio")==0;
+    const auto* begin=scales?resolution:startup?audit:sound?audio:rendering;
+    const size_t count=scales?std::size(resolution):startup?std::size(audit):sound?std::size(audio):std::size(rendering);
+    for (size_t i=0;i<count;++i) {
+        const auto& step=begin[i];if(step.frame!=m_diagnosticFrame)continue;
+        const auto* spec=settings::find(step.section,step.key);
+        if(!spec)throw std::runtime_error("Missing menu diagnostic spec");
+        change(ui,*spec,step.value);
+        std::fprintf(stderr,"[menu-test] frame=%llu %s.%s=%s live=%d pending-restart=%d restart-request=%d quit-request=%d\n",
+                     static_cast<unsigned long long>(m_diagnosticFrame),step.section,step.key,step.value,
+                     appliesLive(step.section,step.key),pendingRestart(*spec),m_restartRequest.load(),m_quitRequest.load());
+        if (sound)
+            std::fprintf(stderr,"[menu-audio-test] volume=%d muted=%d\n", rrv::audio::outputVolume(), rrv::audio::outputMuted());
+    }
 }
 
 void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
 {
+    // Read back actual renderer state, not inferred ini/environment defaults.
+    // Updates are serialized after present, before this next owner callback.
+    if (ui.get_render_option) {
+        for (const char* key : {"scale","aa1","aniso","texture_filter","sprite_filter","mipmap","fxaa","cas"}) {
+            const char* value=ui.get_render_option(key);
+            const auto* spec=settings::find("rendering",key);
+            if(value && spec && settings::valid(*spec,value)) {
+                m_launch[id("rendering",key)]=value;
+                m_values[id("rendering",key)]=value;
+            }
+        }
+    }
+    runDiagnostic(ui);
     std::deque<Input> inputs;
     {
         std::lock_guard<std::mutex> lock(m_inputMutex);
@@ -242,10 +355,10 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
         // else the menu.
         if (isBackKey(input) && !ui.consumes_cancel())
         {
-            if (m_confirmQuit)
+            if (m_confirmation != Confirmation::none)
             {
                 // Back out of the quit confirmation to the menu, not out of the menu.
-                m_confirmQuit = false;
+                m_confirmation = Confirmation::none;
                 m_pageAppearing = true;
                 continue;
             }
@@ -263,32 +376,40 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
     if (!isOpen())
     {
         m_wasOpen = false;
-        m_confirmQuit = false;
+        m_confirmation = Confirmation::none;
         ui.clear_input();
         return;
     }
     if (appearing)
-        m_confirmQuit = false;
+        m_confirmation = Confirmation::none;
 
-    if (m_confirmQuit)
+    if (m_confirmation != Confirmation::none)
     {
-        // Quit confirmation: No on the left (focused), Yes on the right.
+        // Both actions discard unsaved progress: No starts focused.
+        const bool restarting = m_confirmation == Confirmation::restart;
         const bool first = m_pageAppearing;
         m_pageAppearing = false;
-        if (ui.begin_menu("Quit", first ? 1 : 0))
+        if (ui.begin_menu(restarting ? "Restart" : "Quit", first ? 1 : 0))
         {
             ui.text_wrapped("Are you sure? Unsaved progress will be lost.");
             ui.spacing();
             if (ui.button("No"))
             {
-                m_confirmQuit = false;
+                m_confirmation = Confirmation::none;
                 m_pageAppearing = true;
             }
             if (first)
                 ui.default_focus();
             ui.same_line();
             if (ui.button("Yes"))
-                m_quitRequest.store(true);
+            {
+                if (restarting)
+                    m_restartRequest.store(true);
+                else
+                    m_quitRequest.store(true);
+                m_confirmation = Confirmation::none;
+                close();
+            }
         }
         ui.end_menu();
         return;
@@ -302,18 +423,29 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
             close();
         if (menuAppearing)
             ui.default_focus();
-        ui.tooltip("Back to the game (Esc, F1 or the controller's Home button).");
+        ui.tooltip("Back to the game (Esc, F1, Home or a PS4/PS5 touchpad click).");
         ui.same_line();
         if (ui.button("Quit"))
         {
-            m_confirmQuit = true;
+            m_confirmation = Confirmation::quit;
             m_pageAppearing = true;
         }
         ui.tooltip("Quit the game. Your save card is kept.");
+        ui.same_line();
+        const bool canRestart = app::canRestart();
+        ui.begin_disabled(canRestart ? 0 : 1);
+        if (ui.button("Restart") && canRestart)
+        {
+            m_confirmation = Confirmation::restart;
+            m_pageAppearing = true;
+        }
+        ui.tooltip(canRestart ? "Restart the game with saved settings. Unsaved progress will be lost." :
+                                "Launch with magatama_run.sh or the app to enable Restart.");
+        ui.end_disabled();
 
         std::vector<std::string> pending;
         for (const settings::Spec &spec : settings::schema())
-            if (spec.inMenu && pendingRestart(spec))
+            if (availableInMenu(spec) && pendingRestart(spec))
                 pending.emplace_back(spec.label);
         if (!pending.empty())
         {
@@ -322,13 +454,7 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
                 names += (names.empty() ? "" : ", ") + name;
             ui.spacing();
             ui.text_warning(("Restart to apply: " + names + ".").c_str());
-            if (app::canRestart())
-            {
-                if (ui.button("Restart"))
-                    m_restartRequest.store(true);
-                ui.tooltip("Quit and start again with the new settings.");
-            }
-            else
+            if (!canRestart)
                 ui.text_disabled("Quit and relaunch to apply.");
         }
 
@@ -337,7 +463,7 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
         {
             ui.section(sectionTitle(section));
             for (const settings::Spec &spec : settings::schema())
-                if (spec.inMenu && (spec.experimental ? section == "experimental" : spec.section == section))
+                if (availableInMenu(spec) && (spec.experimental ? section == "experimental" : spec.section == section))
                     drawRow(ui, spec, row++);
         }
         if (!pending.empty())
@@ -394,6 +520,12 @@ void Menu::drawRow(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, int
     {
     case settings::Kind::boolean:
     {
+        if (spec.section == "audio" && spec.key == "mute") {
+            const bool muted = settings::boolValue(value);
+            if (ui.button(muted ? "Unmute" : "Mute"))
+                change(ui, spec, muted ? "false" : "true");
+            break;
+        }
         int checked = settings::boolValue(value) ? 1 : 0;
         if (ui.checkbox(label.c_str(), &checked))
             change(ui, spec, checked ? "true" : "false");
@@ -465,16 +597,28 @@ void Menu::change(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, cons
         m_fullscreenRequest.store(settings::boolValue(value) ? 1 : 0);
         return;
     }
+    if (!applyLive(ui, spec, value)) {
+        setStatus("Could not apply " + std::string(spec.label) + ". The current value was kept.");
+        return;
+    }
     m_values[key] = value;
+    if (appliesLive(spec.section,spec.key)) m_launch[key] = value;
     if (save(spec.section, spec.key, value))
         std::fprintf(stderr, "[fukami-menu] saved %s=%s\n", key.c_str(), value.c_str());
-    applyLive(ui, spec, value);
 }
 
-void Menu::applyLive(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, const std::string &value)
+bool Menu::applyLive(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, const std::string &value)
 {
-    if (spec.section == "display" && spec.key == "aspect")
-        ui.set_aspect(value.empty() ? m_launchRatio.c_str() : value.c_str());
+    if (spec.section == "audio" && spec.key == "volume")
+        rrv::audio::setOutputVolume(static_cast<int>(toLong(value, 100)));
+    else if (spec.section == "audio" && spec.key == "mute")
+        rrv::audio::setOutputMuted(settings::boolValue(value));
+    else if (spec.section == "display" && spec.key == "nocturne_aspect") {
+        const char* fit = magatama::aspect::configure(value.c_str());
+        return ui.set_aspect(fit ? fit : "4:3") != 0;
+    }
+    else if (spec.section == "display" && spec.key == "aspect")
+        return ui.set_aspect(value.empty() ? m_launchRatio.c_str() : value.c_str()) != 0;
     else if (spec.section == "display" && spec.key == "integer_scaling")
         ui.set_integer_scaling(settings::boolValue(value) ? 1 : 0);
     else if (spec.section == "rendering" && spec.key == "fxaa")
@@ -483,6 +627,9 @@ void Menu::applyLive(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, c
         ui.set_cas(static_cast<int>(std::clamp<long>(toLong(value, 0), 0, 100)));
     else if (spec.section == "rendering" && spec.key == "metal_hud")
         m_metalHudRequest.store(settings::boolValue(value) ? 1 : 0); // the host sets it on the window's layer
+    else if (spec.section == "rendering" && appliesLive(spec.section, spec.key))
+        return ui.set_render_option && ui.set_render_option(std::string(spec.key).c_str(), value.c_str());
+    return true;
 }
 
 bool Menu::pendingRestart(const settings::Spec &spec) const

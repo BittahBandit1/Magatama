@@ -40,7 +40,7 @@ struct Input
 };
 
 // Settings the menu applies at once (the rest need a restart). fullscreen is
-// applied by the host; the others by the bridge (presentation only).
+// applied by the host; renderer controls by the bridge on its GS owner.
 bool appliesLive(std::string_view section, std::string_view key);
 
 class Menu
@@ -80,10 +80,11 @@ public:
     void frame(const RrvPcsx2GsBridgeUi &ui);
 
 private:
+    void runDiagnostic(const RrvPcsx2GsBridgeUi &ui);
     void reload();
     void drawRow(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, int id);
     void change(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, const std::string &value);
-    void applyLive(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, const std::string &value);
+    bool applyLive(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, const std::string &value);
     bool pendingRestart(const settings::Spec &spec) const;
     bool save(std::string_view section, std::string_view key, const std::string &value);
     void setStatus(std::string status);
@@ -93,7 +94,7 @@ private:
     settings::IniDocument m_defaults; // the app's bundled default ini; empty outside the app
     const std::filesystem::path m_saves;
     const std::filesystem::path m_logs;
-    std::map<std::string, std::string> m_launch; // "section.key" -> value at launch
+    std::map<std::string, std::string> m_launch; // "section.key" -> applied value (launch baseline for restart-only controls)
     std::string m_launchRatio;                   // the ratio the game runs with
 
     std::atomic<bool> m_available{false};
@@ -111,8 +112,10 @@ private:
     std::string m_status;
 
     // GS owner thread only.
+    uint64_t m_diagnosticFrame = 0;
     bool m_wasOpen = false;
-    bool m_confirmQuit = false;     // "Are you sure?" page shown instead of the menu
+    enum class Confirmation { none, quit, restart };
+    Confirmation m_confirmation = Confirmation::none;
     bool m_pageAppearing = false;   // a page (menu or confirmation) is drawn for the first time
     std::map<std::string, std::string> m_values; // "section.key" -> shown value
 };

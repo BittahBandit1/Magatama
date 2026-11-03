@@ -4329,3 +4329,153 @@ index bc48d5697..e82ab89fc 100644
  	AddMacro(ss, "PS_AUTOMATIC_LOD", sel.automatic_lod);
  	AddMacro(ss, "PS_MANUAL_LOD", sel.manual_lod);
  	AddMacro(ss, "PS_COLCLIP", sel.colclip);
+diff --git a/pcsx2/GS/Renderers/Common/GSRenderer.cpp b/pcsx2/GS/Renderers/Common/GSRenderer.cpp
+--- a/pcsx2/GS/Renderers/Common/GSRenderer.cpp
++++ b/pcsx2/GS/Renderers/Common/GSRenderer.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-3.0+
+ 
+ #include "ImGui/FullscreenUI.h"
++#include "GS/RrvOriginalPresentation.h"
+ #include "ImGui/ImGuiManager.h"
+ #include "GS/Renderers/Common/GSRenderer.h"
+ #include "GS/GSCapture.h"
+@@ -603,7 +604,10 @@
+ 	const bool fb_sprite_frame = (fb_sprite_blits > 0);
+ 
+ 	bool skip_frame = false;
+-	if (GSConfig.SkipDuplicateFrames && !GSCapture::IsCapturingVideo())
++	const int source_present = rrv::original_present::gate().consume();
++	if (source_present >= 0)
++		skip_frame = source_present == 0;
++	else if (GSConfig.SkipDuplicateFrames && !GSCapture::IsCapturingVideo())
+ 	{
+ 		bool is_unique_frame;
+ 		switch (PerformanceMetrics::GetInternalFPSMethod())
+diff --git a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+--- a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
++++ b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+@@ -15,6 +15,7 @@
+ 
+ #include "cpuinfo.h"
+ #include "imgui.h"
++#include "GS/RrvOriginalPresentation.h"
+ 
+ #include <thread>
+ #include <cstdio>
+@@ -54,8 +55,9 @@
+ {
+ 	static constexpr double kPeriod = 1001.0 / 60000.0;
+ 	static constexpr size_t kTraceRows = 1u << 20;
+-	bool configured = false, pace = true, have = false;
+-	double margin = 0.002, creep = 2e-6, target = 0.0;
++	bool configured = false, pace = true;
++	rrv::original_present::TargetGrid original_grid;
++	double margin = 0.002, creep = 2e-6;
+ 	u64 presents = 0, late = 0, reanchors = 0;
+ 	std::string trace_path;
+ 	std::unique_ptr<double[]> submit, planned;
+@@ -91,27 +93,8 @@
+ 	// Returns the atTime target, or 0 to present as soon as possible.
+ 	double Plan(double now)
+ 	{
+-		const double earliest = now + margin;
+-		if (!have)
+-		{
+-			have = true;
+-			target = earliest;
+-			return target;
+-		}
+-		const double next = target + kPeriod;
+-		if (earliest > next + 2.0 * kPeriod || next > earliest + 2.0 * kPeriod)
+-		{
+-			++reanchors;
+-			target = earliest;
+-		}
+-		else if (earliest > next)
+-		{
+-			++late;
+-			target = earliest;
+-		}
+-		else
+-			target = std::max(earliest, next - creep);
+-		return target;
++		return original_grid.plan(now, margin, creep,
++			rrv::original_present::gate().fields(), late, reanchors);
+ 	}
+ 	void Present(id<MTLCommandBuffer> buf, id<MTLDrawable> drawable, bool fifo)
+ 	{
+diff --git a/pcsx2/GS/RrvOriginalPresentation.h b/pcsx2/GS/RrvOriginalPresentation.h
+new file mode 100644
+--- /dev/null
++++ b/pcsx2/GS/RrvOriginalPresentation.h
+@@ -0,0 +1,69 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++#include <algorithm>
++#include <cstdint>
++
++namespace rrv::original_present {
++struct Plan {uint64_t field=0,source=0;uint32_t present=1,fields=1;};
++class PlanLatch {
++ bool pending_=false;
++ Plan plan_{};
++public:
++ bool arm(uint64_t field,uint64_t current,uint64_t source,uint32_t present,uint32_t fields,bool full) {
++  if(pending_ || !field || field<=current || present>1 || (fields!=1 && fields!=2) ||
++     (fields==2 && !full) || (fields==1 && !present))return false;
++  plan_={field,source,present,fields};pending_=true;return true;
++ }
++ bool matches(uint64_t field)const{return !pending_ || plan_.field==field;}
++ bool take(uint64_t field,Plan& value,bool& active) {
++  if(!matches(field))return false;
++  active=pending_;value=pending_?plan_:Plan{};pending_=false;return true;
++ }
++};
++// GS-owner-only, within the bridge DSO. No guest/MMIO or simulation state.
++class Gate {
++ int decision_=-1;
++ uint32_t fields_=1;
++public:
++ bool set(int decision,uint32_t fields) {
++  if(decision < -1 || decision > 1 || (fields!=1 && fields!=2) ||
++     (fields==1 && decision==0) || (decision==-1 && fields!=1)) {
++   decision_=-1;fields_=1;return false;
++  }
++  decision_=decision;fields_=fields;return true;
++ }
++ int consume() {int result=decision_;decision_=-1;return result;}
++ uint32_t fields() const {return fields_;}
++};
++inline Gate& gate() {static Gate value;return value;}
++
++class TargetGrid {
++ bool have_=false;
++ uint32_t fields_=1;
++ double target_=0;
++public:
++ static constexpr double base_period=1001.0/60000.0;
++ double plan(double now,double margin,double creep,uint32_t fields,uint64_t& late,uint64_t& reanchors) {
++  if(fields!=1 && fields!=2)fields=1;
++  const double earliest=now+margin;
++  const double period=base_period*fields;
++  if(fields!=fields_) {
++   fields_=fields;
++   if(have_) {
++    ++reanchors;
++    // Do not schedule a newer source image before a previously queued image.
++    target_=std::max(earliest,target_+1e-6);
++    return target_;
++   }
++  }
++  if(!have_) {have_=true;target_=earliest;return target_;}
++  const double next=target_+period;
++  if(earliest>next+2.0*period || next>earliest+2.0*period) {
++   ++reanchors;target_=earliest;
++  } else if(earliest>next) {
++   ++late;target_=earliest;
++  } else target_=std::max(earliest,next-creep);
++  return target_;
++ }
++};
++} // namespace rrv::original_present

@@ -143,6 +143,8 @@ if(BUILD_TESTING)
     target_link_libraries(rrv-sdl-audio-tests PRIVATE SDL2::SDL2)
     add_test(NAME rrv-sdl-audio COMMAND rrv-sdl-audio-tests)
     set_tests_properties(rrv-sdl-audio PROPERTIES ENVIRONMENT "SDL_AUDIODRIVER=dummy")
+    add_test(NAME rrv-sdl-audio-muted COMMAND rrv-sdl-audio-tests --muted)
+    set_tests_properties(rrv-sdl-audio-muted PROPERTIES ENVIRONMENT "SDL_AUDIODRIVER=dummy")
     add_test(NAME rrv-sdl-audio-unavailable COMMAND rrv-sdl-audio-tests --failure)
     set_tests_properties(rrv-sdl-audio-unavailable PROPERTIES
         ENVIRONMENT "SDL_AUDIODRIVER=rrv-unavailable-test-driver")

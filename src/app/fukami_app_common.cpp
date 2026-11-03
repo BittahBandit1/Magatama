@@ -108,7 +108,7 @@ std::filesystem::path iniPath()
     return value && *value ? std::filesystem::path(value) : std::filesystem::path{};
 }
 
-bool canRestart() { return inApp(); }
+bool canRestart() { return inApp() || detail::terminalRestartEnabled(); }
 
 std::filesystem::path savesFolder()
 {

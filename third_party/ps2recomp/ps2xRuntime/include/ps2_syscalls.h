@@ -18,6 +18,7 @@ inline std::mutex g_sys_fd_mutex;
 
 namespace ps2_syscalls
 {
+    bool magatamaTimedDmacReadyV1(R5900Context*,PS2Runtime*);
 #define PS2_DECLARE_SYSCALL(name) void name(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     PS2_SYSCALL_LIST(PS2_DECLARE_SYSCALL)
 #undef PS2_DECLARE_SYSCALL

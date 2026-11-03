@@ -47,6 +47,14 @@ inline void QuietBumpProducer() {
 #include <vector>
 #include "runtime/rrv_ipu.h"
 namespace ps2_syscalls { void magatamaDeferDmacCause(uint32_t cause); }
+namespace rrv::ipu_worker_timing {
+void configure(Schedule schedule,std::function<void(unsigned)> interrupt) {
+    ipu::workerSchedule=std::move(schedule);ipu::workerInterrupt=std::move(interrupt);
+}
+}
+#include "runtime/magatama_render_pose_hook.h"
+MagatamaRenderUnpackObserver g_magatamaRenderUnpackObserver = nullptr;
+MagatamaRenderUnpackTransform g_magatamaRenderUnpackTransform = nullptr;
 std::function<bool(uint8_t*, uint32_t)> g_magatamaVif1Readback;
 static uint32_t magatamaReadIORegisterTraced(uint32_t address, uint32_t value);
 namespace {
@@ -2002,7 +2010,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                     {
-                        if (girlUploadProvenanceEnabled() || matrixTrace)
+                        if (girlUploadProvenanceEnabled() || matrixTrace || g_magatamaRenderUnpackObserver || g_magatamaRenderUnpackTransform)
                             provBlocks.push_back({chainBuf.size(), srcAddr, qwCount * 16u,
                                                   provCurrentTag, provCurrentId});
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
@@ -2756,7 +2764,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         pt.srcAddr = 0;
                         pt.qwc = 0;
                         pt.chainData = std::move(chainBuf);
-                        if (matrixTrace && channelBase == 0x10009000)
+                        if ((matrixTrace || g_magatamaRenderUnpackObserver || g_magatamaRenderUnpackTransform) && channelBase == 0x10009000)
                         {
                             pt.traceChainId = ++m_vif1TraceNextChainId;
                             pt.sourceBlocks.reserve(provBlocks.size());

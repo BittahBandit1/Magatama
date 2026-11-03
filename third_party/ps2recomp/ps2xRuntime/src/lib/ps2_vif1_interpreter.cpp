@@ -1,3 +1,4 @@
+#include "runtime/magatama_render_pose_hook.h"
 // Based on Blackline Interactive implementation
 #include "ps2_syscalls.h"
 #include "runtime/ps2_memory.h"
@@ -829,6 +830,30 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
+                std::array<uint8_t,208> renderCopy;
+                if (g_magatamaRenderUnpackObserver || g_magatamaRenderUnpackTransform)
+                {
+                    uint32_t source=0xffffffffu;
+                    const auto address=reinterpret_cast<uintptr_t>(srcBase);
+                    const auto ram=reinterpret_cast<uintptr_t>(m_rdram);
+                    if(m_rdram && address>=ram && address-ram<PS2_RAM_SIZE &&
+                        totalBytes<=PS2_RAM_SIZE-(address-ram))source=uint32_t(address-ram);
+                    else if(m_vif1TraceSourceBlocks && m_vif1TraceDataBase)
+                    {
+                        const auto base=reinterpret_cast<uintptr_t>(m_vif1TraceDataBase);
+                        if(address>=base)for(const auto& block:*m_vif1TraceSourceBlocks)
+                        {
+                            const size_t offset=address-base;
+                            if(offset>=block.offset && offset-block.offset<block.bytes &&
+                                totalBytes<=block.bytes-(offset-block.offset))
+                            {source=block.source+uint32_t(offset-block.offset);break;}
+                        }
+                    }
+                    if (auto observe=g_magatamaRenderUnpackObserver) observe(source,cmd,vuAddr,srcBase,totalBytes);
+                    if(totalBytes<=renderCopy.size() && g_magatamaRenderUnpackTransform &&
+                        g_magatamaRenderUnpackTransform(source,cmd,srcBase,totalBytes,renderCopy.data()))
+                        srcBase=renderCopy.data();
+                }
                 static const bool gate4MatrixTrace = [] {
                     const char *v = std::getenv("RRV_VU_MATRIX_TRACE");
                     return v && v[0] && v[0] != '0';

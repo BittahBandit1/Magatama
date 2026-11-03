@@ -1,0 +1,19 @@
+{
+  "repository": "https://github.com/Sinan-Karakaya/PS2Recomp",
+  "revision": "888ec479165f41b899bb081e0ca7123b8c5af31a",
+  "dq8_revision": "f6dfd968001b492415969bb70bd5aad3bfa79abd",
+  "files_sha256": {
+    "LICENSE": "831e92808eb553250066261a1387a9323cbf300d4559a41f2c71fd3712bdb44a",
+    "lle/spu2.cpp": "03f4fd1b68e21a7e9edab48e34bc064575911c3026766ece6558059bf4b59600",
+    "lle/bus.h": "771853772b66a57d372610f4c0a47f0ca8ae4135b93026f9e6a9c4bcc6aa1660",
+    "lle/kernel.cpp": "0b5a97d0c5aaf956803bf652f8ad1960c6b97cc7a63790e0765389e75e40f53c",
+    "lle/irx.cpp": "a299d6c4975f3ca7641fd9290b74bf98926b0bf52f5667b095078edaf3addce2",
+    "lle/iop.h": "a8f1f78033d7dd52b76e2d45e49edd5127e7fba462362bb9ee907c540dca2821",
+    "lle/iop.cpp": "d32fdfae335f968ea16d9af1d2dd5cd1a3b3c8b4bed3c82252b8522d51bc4a41",
+    "lle/cpu.h": "d2fe21a3985217bdfa097e4761c29d8f2e9334a58459d6290c58347a45955a28",
+    "lle/kernel_handlers.inc": "b9a4887afb6a9161a710cff1a46af1599f7b3277119560482b906c19dc488626",
+    "lle/cpu.cpp": "04b2bfd559cef22d3dfece93cbee9a06d32fc56977b901220b8d1babbb76d9b9",
+    "lle/spu2.h": "e504a3528903e3ea52885b83c5b53e2c6286a0ea97edaf474304392a8331b225",
+    "lle/irx.h": "fe42dd5aad6d4eb4856e53213559af9881843690762cfc68820cfb5878f4eeba"
+  }
+}

@@ -78,7 +78,11 @@ void testValidation()
     const auto ok = [](const char *section, const char *key, const char *value) {
         return valid(*find(section, key), value);
     };
+    expect(ok("audio", "volume", "0") && ok("audio", "volume", "100") && !ok("audio", "volume", "101") &&
+           !ok("audio", "volume", "-1") && !ok("audio", "volume", "nan"), "volume is a bounded percentage");
+    expect(ok("audio", "mute", "true") && ok("audio", "mute", "false") && !ok("audio", "mute", "maybe"), "mute boolean validation");
     expect(ok("display", "ratio", "21:9") && !ok("display", "ratio", "5:4"), "ratio");
+    expect(ok("display", "nocturne_aspect", "32:9") && ok("display", "aspect", "32:9"), "32:9 Nocturne world and presentation ratio");
     expect(ok("display", "hud", "no47") && !ok("display", "hud", "none"), "hud");
     expect(ok("display", "aspect", "") && ok("display", "aspect", "stretch") && !ok("display", "aspect", "wide"), "aspect");
     expect(ok("display", "window", "") && ok("display", "window", "1920x1080") && !ok("display", "window", "1920"), "window");
@@ -150,6 +154,7 @@ void testLaunchConfig()
         "RRV_GATE3_MC_PERSISTENT=1", "RRV_GATE3_RECORD_PAD=/R/local/product/sessions/S/pad.jsonl",
         "RRV_GATE3_REALTIME=1", "RRV_PCSX2_GS_VSYNC=1", "RRV_GS_EXECUTION=worker-sync",
         "RRV_VU1GS_EXECUTION=owner-async", "RRV_VU1GS_SPLIT=1", "RRV_GS_RENDER_MODE=full", "RRV_PCSX2_GS_FULL_SCALE=4",
+        "RRV_PCSX2_GS_FXAA=1", // existing FXAA-on default; fixture predates it
         "RRV_PCSX2_GS_FULL_HWMIPMAP=0", "RRV_RR5_CAR_LOD=4", "RRV_RR5_FAST_UNPACK=1", "RRV_RR5_NATIVE_HOT=1", "RRV_RR5_WIDESCREEN=16:9",
         "RRV_PCSX2_GS_HUD_SCALE=0.75", "RRV_PCSX2_GS_HUD_MODE=race",
         "RRV_PCSX2_GS_ASPECT=16:9",

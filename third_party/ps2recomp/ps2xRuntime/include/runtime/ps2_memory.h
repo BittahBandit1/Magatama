@@ -427,6 +427,15 @@ public:
     bool initialize(size_t ramSize = PS2_RAM_SIZE);
 
     // Memory access methods
+    struct DmacInterruptSnapshotV1 {uint32_t status,control,enable;};
+    // Owner-domain observation: no MMIO dispatch, servicing or clock advance.
+    DmacInterruptSnapshotV1 dmacInterruptSnapshotV1() const {
+        const auto value=[&](uint32_t address,uint32_t absent) {
+            const auto it=m_ioRegisters.find(address);return it==m_ioRegisters.end()?absent:it->second;
+        };
+        // An unwritten D_CTRL is treated as enabled by the existing DMA bus.
+        return {value(0x1000e010u,0),value(0x1000e000u,1),value(0x1000f520u,0)};
+    }
     uint8_t *getRDRAM() { return m_rdram; }
     uint8_t *getScratchpad() { return m_scratchpad; }
     uint8_t *getIOPRAM() { return iop_ram; }

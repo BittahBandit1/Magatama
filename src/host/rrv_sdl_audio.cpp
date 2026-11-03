@@ -1,4 +1,6 @@
 #include "rrv_sdl_audio.h"
+#include "rrv_audio_output.h"
+#include "rrv_audio_output_probe.h"
 #include "rrv_platform.h"
 
 #include <SDL.h>
@@ -11,6 +13,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <time.h>
 #include <vector>
@@ -37,6 +40,11 @@ struct Device
     std::vector<SoundHandle> sounds;
     std::atomic<StreamPull> streamPull{nullptr};
     std::atomic<void*> streamUser{nullptr};
+    // Diagnostic mute still consumes/mixes PCM at the hardware callback rate.
+    // It must not pause the device, synthesis or native audio-ring draining.
+    bool muted = false;
+    std::unique_ptr<OutputProbe> outputProbe;
+    std::string outputProbePath;
     // Host-stall watchdog (Gate-8 L3), see watchdogLoop().
     std::thread watchdog;
     std::atomic<bool> watchdogStop{false};
@@ -67,6 +75,20 @@ void mix(float* output, size_t samples)
             sound->active = false;
     }
     std::erase_if(state.sounds, [](const auto& sound) { return !sound->active; });
+    if (outputMuted())
+        std::fill_n(output, samples, 0.0f);
+    else if (const int volume = outputVolume(); volume != 100)
+    {
+        const float gain = volume / 100.0f;
+        for (size_t index = 0; index < samples; ++index)
+            output[index] *= gain;
+    }
+    if(state.outputProbe) {
+        const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        state.outputProbe->observe(output,samples/2,ns);
+    }
+    if(state.muted)std::fill_n(output,samples,0.0f);
 }
 
 void callback(void*, Uint8* stream, int length)
@@ -76,6 +98,8 @@ void callback(void*, Uint8* stream, int length)
 
 SDL_AudioDeviceID openDevice(SDL_AudioSpec* obtained)
 {
+    const char* mute = std::getenv("MAGATAMA_TEST_MUTE");
+    device().muted = mute && std::strcmp(mute, "1") == 0;
     SDL_AudioSpec wanted{};
     wanted.freq = 48000;
     wanted.format = AUDIO_F32SYS;
@@ -170,6 +194,11 @@ void initialize()
     auto& state = device();
     if (state.initialized.load())
         return;
+    if(const char* path=std::getenv("MAGATAMA_AUDIO_OUTPUT_PROBE");path && *path) {
+        const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        state.outputProbe=std::make_unique<OutputProbe>(ns);state.outputProbePath=path;
+    }
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0)
     {
         std::fprintf(stderr, "[audio] SDL audio initialization failed: %s\n", SDL_GetError());
@@ -196,6 +225,8 @@ void initialize()
     }
     state.initialized.store(true);
     std::fprintf(stderr, "[audio] SDL default playback initialized; float32 stereo rate=%d\n", state.spec.freq);
+    if (state.muted)
+        std::fprintf(stderr, "[audio] test playback muted; PCM consumption and capture unchanged\n");
 #if !defined(RRV_SDL_AUDIO_TESTING)
     if (const char* v = std::getenv("RRV_AUDIO_STALL_RESTART"); !(v && v[0] == '0' && v[1] == '\0'))
     {
@@ -231,6 +262,13 @@ void shutdown()
     if (state.id)
         SDL_CloseAudioDevice(state.id);
     state.id = 0;
+    if(state.outputProbe) {
+        if(!state.outputProbePath.empty()) {
+            const bool saved=state.outputProbe->save(state.outputProbePath.c_str());
+            std::fprintf(stderr,"[audio-output-probe] records=%u saved=%d pre-test-mute=1\n",state.outputProbe->count(),int(saved));
+        }
+        state.outputProbe.reset();state.outputProbePath.clear();
+    }
     {
         std::lock_guard<std::mutex> lock(state.mutex);
         for (auto& sound : state.sounds)
@@ -309,5 +347,10 @@ void stop(const SoundHandle& sound)
 void pauseForTesting() { SDL_PauseAudioDevice(device().id, 1); }
 void mixForTesting(float* stereo, size_t frames) { mix(stereo, frames * 2); }
 int sampleRateForTesting() { return device().spec.freq; }
+void armOutputProbeForTesting() {
+    const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    device().outputProbe=std::make_unique<OutputProbe>(ns-16000000000ull);
+}
+float firstOutputProbeSampleForTesting() {return device().outputProbe->firstSample();}
 #endif
 }

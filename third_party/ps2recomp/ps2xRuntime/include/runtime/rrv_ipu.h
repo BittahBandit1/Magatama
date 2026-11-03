@@ -9,6 +9,8 @@
 #include <limits>
 #include <unordered_map>
 #include <vector>
+#include "rrv_ipu_worker_timing.h"
+namespace rrv::ipu { void requestWorker(unsigned cycles); }
 
 #pragma push_macro("__fi")
 #pragma push_macro("__ri")
@@ -26,7 +28,7 @@
 #define MULTI_ISA_COMPILE_ONCE 1
 #define MULTI_ISA_UNSHARED_START
 #define MULTI_ISA_UNSHARED_END
-#define IPU_INT_PROCESS(cycles) ((void)0)
+#define IPU_INT_PROCESS(cycles) rrv::ipu::requestWorker(cycles)
 #define jNO_DEFAULT default: assert(false); break;
 
 namespace rrv::ipu {
@@ -72,6 +74,26 @@ inline u8* ram=nullptr;
 inline constexpr u32 ramMask=0x01ffffff;
 inline std::vector<unsigned> completed;
 inline uint64_t inputBytes=0, outputBytes=0;
+inline ipu_worker_timing::Schedule workerSchedule;
+inline std::function<void(unsigned)> workerInterrupt;
+inline uint64_t workerEpoch=0;
+inline bool workerPending=false;
+inline unsigned workerDelay=0;
+inline void requestWorker(unsigned cycles) {if(workerSchedule)workerDelay=cycles;}
+inline void cancelWorker() {++workerEpoch;workerPending=false;workerDelay=0;}
+void service(std::unordered_map<u32,u32>& regs,u8* memory);
+inline void scheduleWorker() {
+    if(!workerSchedule || !workerDelay || workerPending)return;
+    const auto epoch=workerEpoch;
+    const unsigned cycles=workerDelay;workerDelay=0;workerPending=true;
+    workerSchedule(cycles,[epoch]{
+        if(epoch!=workerEpoch || !workerPending || !bus || !ram)return;
+        workerPending=false;
+        service(*bus,ram);
+        for(unsigned cause:completed)workerInterrupt(cause);
+        completed.clear();
+    });
+}
 inline void finishDma(u32 base, unsigned cause) {
     (*bus)[base]&=~0x100u;
     completed.push_back(cause);
@@ -145,6 +167,7 @@ inline void IPU_Fifo_Output::read(void*, uint) { assert(false && "IPU output use
 inline void IPU_Fifo::init() { in.clear(); out.clear(); }
 inline void IPU_Fifo::clear() { in.clear(); out.clear(); }
 inline void reset() {
+    cancelWorker();workerSchedule={};workerInterrupt={};
     bus=nullptr; ram=nullptr; completed.clear(); irqPending=false;
     inputBytes=outputBytes=0; ipu0ch={}; ipu1ch={};
     ipuReset(); irqPending=false;
@@ -154,7 +177,7 @@ inline void service(std::unordered_map<u32,u32>& regs, u8* memory) {
     refill();
     // The upstream worker yields between macroblocks. Run until it either
     // needs input or fills the destination DMA, with a bounded work budget.
-    for(unsigned i=0;i<4096 && ipuRegs.ctrl.BUSY;++i) {
+    for(unsigned i=0;i<4096 && ipuRegs.ctrl.BUSY && !workerPending && !workerDelay;++i) {
         ipu0ch.chcr.STR=(regs[0x1000b000]&0x100)!=0;
         ipu0ch.qwc=regs[0x1000b020];
         const auto beforeIn=inputBytes, beforeOut=outputBytes;
@@ -167,13 +190,17 @@ inline void service(std::unordered_map<u32,u32>& regs, u8* memory) {
     auto& stat=regs[0x1000e010];
     if((stat&0x3ff)&((stat>>16)&0x3ff)) stat|=1u<<31;
     else stat&=~(1u<<31);
+    scheduleWorker();
 }
 inline u32 read(u32 address) {
     if((address&0xff)==4) return ipuRegs.cmd.BUSY;
     if((address&0xff)==0x34) return ipuRegs.topbusy;
     return ipuRead32(address);
 }
-inline void write(u32 address,u32 value) { ipuWrite32(address,value); }
+inline void write(u32 address,u32 value) {
+    if((address&0xff)==0x10 && (value&(1u<<30)))cancelWorker();
+    ipuWrite32(address,value);
+}
 }
 #undef W1
 #undef W2

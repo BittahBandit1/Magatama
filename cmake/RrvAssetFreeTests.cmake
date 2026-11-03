@@ -435,3 +435,15 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/generated/rr5/output")
     message(STATUS "rrv asset-free: generated game code absent; its checks skip (run scripts/fukami_generate.py)")
     set_tests_properties(rrv-vu-prog rrv-source-ownership rrv-ee-native-gen PROPERTIES FAIL_REGULAR_EXPRESSION "")
 endif()
+
+# Original Nocturne frame identity policy; no game assets, window or bridge.
+add_executable(rrv-nocturne-original-frame-tests "${CMAKE_SOURCE_DIR}/tests/nocturne_original_frame_test.cpp")
+target_include_directories(rrv-nocturne-original-frame-tests PRIVATE "${CMAKE_SOURCE_DIR}/src/gs-backend")
+add_test(NAME rrv-nocturne-original-frame COMMAND rrv-nocturne-original-frame-tests)
+
+# Render-copy pose math/continuity guards; no game assets, window or bridge.
+foreach(pose_test IN ITEMS math interpolation)
+    add_executable(rrv-nocturne-pose-${pose_test}-tests "${CMAKE_SOURCE_DIR}/tests/nocturne_pose_${pose_test}_test.cpp")
+    target_include_directories(rrv-nocturne-pose-${pose_test}-tests PRIVATE "${CMAKE_SOURCE_DIR}/src/product" "${CMAKE_SOURCE_DIR}/src/gs-backend")
+    add_test(NAME rrv-nocturne-pose-${pose_test} COMMAND rrv-nocturne-pose-${pose_test}-tests)
+endforeach()

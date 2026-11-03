@@ -20,6 +20,7 @@
 #include "pcsx2/Config.h"
 #include "pcsx2/GS.h"
 #include "pcsx2/GS/GSPerfMon.h"
+#include "pcsx2/GS/RrvOriginalPresentation.h"
 #include "pcsx2/GS/Renderers/Common/GSDevice.h"
 #include "pcsx2/PerformanceMetrics.h"
 #include "pcsx2/Host.h"
@@ -1066,6 +1067,7 @@ struct RrvPcsx2GsBridge {
     bool capture_in_progress = false;
     bool fp_isolated = false;
     bool full_frame = false;
+    rrv::original_present::PlanLatch original_plan;
     bool dof_log = false;                  // RRV_PCSX2_GS_FULL_DOF_LOG=1
     uint64_t dof_seen[2]{};                // native-size blur draws counted so far (forward, return)
     bool fpcr_path_logged[4]{};
@@ -1788,9 +1790,9 @@ extern "C" RrvPcsx2GsBridge* rrv_pcsx2_gs_bridge_create(
         std::fprintf(stderr, "[pcsx2-gs-bridge] presentation vsync=%s (display sync, display %u Hz)\n",
                      SyncModeName(display_sync), display_hz);
     // Gate 7 aspect/UI: how the displayed image is fitted into the window.
-    // RRV_PCSX2_GS_ASPECT=auto|4:3|16:9|16:10|21:9|stretch (default auto =
+    // RRV_PCSX2_GS_ASPECT=auto|4:3|16:9|16:10|21:9|32:9|stretch (default auto =
     // PCSX2's Auto 4:3/3:2, i.e. 4:3 for RR5's interlaced NTSC output). 16:10
-    // and 21:9 use Auto with PCSX2's custom ratio (the slot patches use).
+    // and wider ratios use Auto with PCSX2's custom ratio (the slot patches use).
     // Wider ratios widen the same picture unless the game renders wider too
     // (RR5 enhancement RRV_RR5_WIDESCREEN).
     // PCSX2's CalculateDrawDstRect reads EmuConfig.CurrentAspectRatio, not
@@ -1808,16 +1810,16 @@ extern "C" RrvPcsx2GsBridge* rrv_pcsx2_gs_bridge_create(
             options.AspectRatio = AspectRatioType::R4_3;
         else if (value == "16:9")
             options.AspectRatio = AspectRatioType::R16_9;
-        else if (value == "16:10" || value == "21:9")
+        else if (value == "16:10" || value == "21:9" || value == "32:9")
         {
             options.AspectRatio = AspectRatioType::RAuto4_3_3_2;
-            custom_aspect = value == "16:10" ? 16.0f / 10.0f : 21.0f / 9.0f;
+            custom_aspect = value == "16:10" ? 16.0f / 10.0f : value == "21:9" ? 21.0f / 9.0f : 32.0f / 9.0f;
         }
         else if (value == "stretch")
             options.AspectRatio = AspectRatioType::Stretch;
         else
         {
-            SetError(error, error_capacity, "RRV_PCSX2_GS_ASPECT must be auto, 4:3, 16:9, 16:10, 21:9 or stretch, got %s",
+            SetError(error, error_capacity, "RRV_PCSX2_GS_ASPECT must be auto, 4:3, 16:9, 16:10, 21:9, 32:9 or stretch, got %s",
                      aspect);
             return nullptr;
         }
@@ -3364,10 +3366,10 @@ int OverlaySetAspect(const char* value)
         type = AspectRatioType::R4_3;
     else if (v == "16:9")
         type = AspectRatioType::R16_9;
-    else if (v == "16:10" || v == "21:9")
+    else if (v == "16:10" || v == "21:9" || v == "32:9")
     {
         type = AspectRatioType::RAuto4_3_3_2;
-        custom = v == "16:10" ? 16.0f / 10.0f : 21.0f / 9.0f;
+        custom = v == "16:10" ? 16.0f / 10.0f : v == "21:9" ? 21.0f / 9.0f : 32.0f / 9.0f;
     }
     else if (v == "stretch")
         type = AspectRatioType::Stretch;
@@ -3409,6 +3411,84 @@ int OverlaySetCas(int sharpness)
     }
     std::fprintf(stderr, "[pcsx2-gs-bridge] menu: cas=%d\n", sharpness);
     return 1;
+}
+
+// Only the serialized GS owner reads/writes this queue. UI drawing must not
+// recreate resources while ImGui is building a frame. Apply after GSvsync.
+std::unique_ptr<Pcsx2Config::GSOptions> s_menu_options;
+int s_menu_sprite_coverage = -1;
+unsigned s_menu_dirty = 0;
+
+int OverlaySetRenderOption(const char* key, const char* value)
+{
+    if (!key || !value) return 0;
+    const std::string_view k(key), v(value);
+    Pcsx2Config::GSOptions next = s_menu_options ? *s_menu_options : GSConfig;
+    if (k == "scale") {
+        if (v.size()!=1 || v[0]<'1' || v[0]>'8') return 0;
+        next.UpscaleMultiplier = float(v[0]-'0');
+    } else if (k == "aa1" || k == "mipmap") {
+        if (v!="true" && v!="false") return 0;
+        if (k=="aa1") next.HWAA1 = v=="true";
+        else next.HWMipmap = v=="true";
+    } else if (k == "aniso") {
+        if (v!="0" && v!="2" && v!="4" && v!="8" && v!="16") return 0;
+        next.MaxAnisotropy = static_cast<u8>(std::atoi(value));
+    } else if (k == "texture_filter") {
+        if (v!="ps2" && v!="bilinear") return 0;
+        next.TextureFiltering = v=="ps2" ? BiFiltering::PS2 : BiFiltering::Forced_But_Sprite;
+    } else if (k == "sprite_filter") {
+        if (v!="ps2" && v!="even") return 0;
+        s_menu_sprite_coverage = v=="even" ? 1 : 0;
+    } else return 0;
+    s_menu_dirty |= k=="scale" ? 1u : k=="aa1" ? 2u : k=="aniso" ? 4u : k=="texture_filter" ? 8u : k=="mipmap" ? 16u : 0u;
+    s_menu_options = std::make_unique<Pcsx2Config::GSOptions>(std::move(next));
+    std::fprintf(stderr,"[pcsx2-gs-bridge] menu: queued %s=%s\n",key,value);
+    return 1;
+}
+
+const char* OverlayGetRenderOption(const char* key)
+{
+    if (!key) return nullptr;
+    const std::string_view k(key);
+    static char number[32]; // same serialized owner as the caller
+    if (k=="scale") std::snprintf(number,sizeof(number),"%.0f",GSConfig.UpscaleMultiplier);
+    else if (k=="aniso") std::snprintf(number,sizeof(number),"%u",unsigned(GSConfig.MaxAnisotropy));
+    else if (k=="cas") std::snprintf(number,sizeof(number),"%u",GSConfig.CASMode==GSCASMode::Disabled?0u:unsigned(GSConfig.CAS_Sharpness));
+    else if (k=="aa1") return GSConfig.HWAA1?"true":"false";
+    else if (k=="mipmap") return GSConfig.HWMipmap?"true":"false";
+    else if (k=="fxaa") return GSConfig.FXAA?"true":"false";
+    else if (k=="texture_filter") return GSConfig.TextureFiltering==BiFiltering::PS2?"ps2":"bilinear";
+    else if (k=="sprite_filter") return SpriteCoverage().on?"even":"ps2";
+    else return nullptr;
+    return number;
+}
+
+void ApplyMenuRenderOptions(uint64_t field)
+{
+    if (!s_menu_options) return;
+    const auto options = std::move(s_menu_options);
+    // Same supported update path as PCSX2's live upscale hotkeys. AA1 may
+    // recreate the graphics device, with GS state frozen/restored internally;
+    // it never reloads the ELF, resets the game or touches its memory card.
+    auto next = GSConfig; // retain presentation changes made later in the UI frame
+    if (s_menu_dirty & 1u) next.UpscaleMultiplier = options->UpscaleMultiplier;
+    if (s_menu_dirty & 2u) next.HWAA1 = options->HWAA1;
+    if (s_menu_dirty & 4u) next.MaxAnisotropy = options->MaxAnisotropy;
+    if (s_menu_dirty & 8u) next.TextureFiltering = options->TextureFiltering;
+    if (s_menu_dirty & 16u) next.HWMipmap = options->HWMipmap;
+    s_menu_dirty = 0;
+    EmuConfig.GS = next;
+    GSUpdateConfig(next);
+    if (s_menu_sprite_coverage >= 0) {
+        SpriteCoverage().on = s_menu_sprite_coverage != 0;
+        GSRrvSetSpriteCoverage(SpriteCoverage().on);
+        s_menu_sprite_coverage = -1;
+    }
+    std::fprintf(stderr,"[pcsx2-gs-bridge] menu: applied field=%llu scale=%.0f aa1=%d aniso=%u texture_filter=%d sprite_filter=%d mipmap=%d\n",
+                 static_cast<unsigned long long>(field),GSConfig.UpscaleMultiplier,
+                 int(GSConfig.HWAA1),unsigned(GSConfig.MaxAnisotropy),int(GSConfig.TextureFiltering),
+                 int(SpriteCoverage().on),int(GSConfig.HWMipmap));
 }
 
 // Runs the host overlay, if one is registered, inside the open ImGui frame.
@@ -3457,6 +3537,8 @@ void RunHostOverlay()
     ui.set_integer_scaling = OverlaySetIntegerScaling;
     ui.set_fxaa = OverlaySetFxaa;
     ui.set_cas = OverlaySetCas;
+    ui.set_render_option = OverlaySetRenderOption;
+    ui.get_render_option = OverlayGetRenderOption;
     s_overlay_frame(s_overlay_context, &ui);
     if (s_overlay_font_pushed)
     {
@@ -3477,6 +3559,24 @@ extern "C" void rrv_pcsx2_gs_bridge_set_overlay(RrvPcsx2GsBridgeOverlayFrame fra
     std::fprintf(stderr, "[pcsx2-gs-bridge] host overlay %s\n", frame ? "registered" : "cleared");
 }
 
+extern "C" int rrv_pcsx2_gs_bridge_set_original_present_plan(
+    RrvPcsx2GsBridge* bridge, uint64_t field, uint64_t source,
+    uint32_t present, uint32_t fields, char* error, uint32_t capacity)
+{
+#if !defined(__APPLE__)
+    SetError(error,capacity,"Original presentation is currently Metal-only");
+    return 0;
+#else
+    if (!bridge || !bridge->open || !bridge->direct_present || !bridge->gpu_renderer ||
+        !bridge->original_plan.arm(field,bridge->field_index,source,present,fields,bridge->full_frame))
+    {
+        SetError(error,capacity,"Invalid, stale or overlapping original presentation plan");
+        return 0;
+    }
+    return 1;
+#endif
+}
+
 extern "C" int rrv_pcsx2_gs_bridge_vsync(
     RrvPcsx2GsBridge* bridge, const RrvPcsx2GsPrivRegs regs,
     uint64_t field_index, uint32_t field_parity, char* error, uint32_t error_capacity)
@@ -3490,6 +3590,11 @@ extern "C" int rrv_pcsx2_gs_bridge_vsync(
     if (field_parity > 1u)
     {
         SetError(error, error_capacity, "field parity must be 0 or 1 (got %u)", field_parity);
+        return 0;
+    }
+    if (!bridge->original_plan.matches(field_index))
+    {
+        SetError(error,error_capacity,"Original presentation plan belongs to another field");
         return 0;
     }
 
@@ -3539,6 +3644,17 @@ extern "C" int rrv_pcsx2_gs_bridge_vsync(
                      static_cast<unsigned long long>(field_index), SyncModeName(bridge->display_sync));
         bridge->vsync_from_field = 0;
     }
+    // Explicit source decisions bypass the duplicate-register heuristic only
+    // for this host present. GSvsync and Merge still consume the entire field.
+    rrv::original_present::Plan original_plan;
+    bool original_active=false;
+    if (!bridge->original_plan.take(field_index,original_plan,original_active) ||
+        !rrv::original_present::gate().set(original_active ? int(original_plan.present) : -1,
+                                         original_active ? original_plan.fields : 1u))
+    {
+        SetError(error,error_capacity,"Original presentation plan could not be consumed");
+        return 0;
+    }
     GSvsync(pcsx2_field, VsyncRegistersWritten());
     if (bridge->dof_log)
     {
@@ -3556,6 +3672,7 @@ extern "C" int rrv_pcsx2_gs_bridge_vsync(
     if (SpriteCoverage().on)
         GSRrvClearAlignedSprites(); // this field's draws are flushed
     HudStatsFieldEnd();
+    ApplyMenuRenderOptions(field_index);
 #if defined(__linux__)
     GsWaitLogger().Field(bridge->direct_present);
 #endif

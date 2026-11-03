@@ -1,3 +1,4 @@
+#include "runtime/rrv_dmac_irq.h"
 #include <deque>
 #include <atomic>
 #include <mutex>
@@ -49,8 +50,24 @@ void gate3RetireCallback(int id, PS2Runtime* runtime) {
 static std::mutex g_deferredDmacMutex;
 static std::deque<uint32_t> g_deferredDmac;
 static std::atomic<bool> g_deliveringDeferredDmac{false};
+static thread_local R5900Context* g_deferredDmacContext=nullptr;
+static bool timedIpuWorkerEnabled() {
+    static const bool enabled=[] {const char* p=std::getenv("MAGATAMA_IPU_WORKER_TIMING");return p && p[0]=='1';}();
+    return enabled;
+}
+bool magatamaTimedDmacReadyV1(R5900Context* ctx,PS2Runtime* runtime) {
+    if(!timedIpuWorkerEnabled())return false;
+    const auto state=runtime->memory().dmacInterruptSnapshotV1();
+    if(!rrv::dmac_irq::eligible(ctx->cop0_status,state.status,state.control,state.enable))return false;
+    std::lock_guard lock(g_deferredDmacMutex);
+    for(unsigned cause:g_deferredDmac)
+        if(cause<10 && (state.status&(state.status>>16)&(1u<<cause)))return true;
+    return false;
+}
+
 void magatamaDeferDmacCause(uint32_t cause) {
     std::lock_guard lock(g_deferredDmacMutex); g_deferredDmac.push_back(cause);
+    if(timedIpuWorkerEnabled())rrv::guest_time::QuietBump();
 }
 void magatamaDeliverDeferredDmac(uint8_t* rdram, PS2Runtime* runtime) {
     if (g_deliveringDeferredDmac.exchange(true)) return;
@@ -59,6 +76,15 @@ void magatamaDeliverDeferredDmac(uint8_t* rdram, PS2Runtime* runtime) {
         { std::lock_guard lock(g_deferredDmacMutex);
           if (g_deferredDmac.empty()) break;
           cause = g_deferredDmac.front(); g_deferredDmac.pop_front(); }
+        if(timedIpuWorkerEnabled() && g_deferredDmacContext) {
+            const auto state=runtime->memory().dmacInterruptSnapshotV1();
+            if(!rrv::dmac_irq::eligible(g_deferredDmacContext->cop0_status,state.status,state.control,state.enable) ||
+               cause>=10 || !(state.status&(state.status>>16)&(1u<<cause))) {
+                std::lock_guard lock(g_deferredDmacMutex);g_deferredDmac.push_back(cause);
+                break;
+            }
+            runtime->memory().write32(0x1000e010u,1u<<cause); // kernel W1C acknowledgement before handlers
+        }
         dispatchDmacHandlersForCause(rdram, runtime, cause);
     }
     g_deliveringDeferredDmac.store(false);
@@ -71,8 +97,20 @@ void gate3DeliverTemporal(uint8_t* rdram,R5900Context* ctx,PS2Runtime* runtime) 
         const auto& a=alarm->second;
         runtime->gate3RunCallbackV1(ctx,a.handler,a.gp,alarm->first,a.ticks,a.arg,false,1);
     }
-    if(!intc.InterruptEligible(ctx->cop0_status))return;
-    magatamaDeliverDeferredDmac(rdram,runtime);
+    if(timedIpuWorkerEnabled()) {
+        if(magatamaTimedDmacReadyV1(ctx,runtime)) {
+            struct DmacContextScope {
+                R5900Context* saved;
+                explicit DmacContextScope(R5900Context* next):saved(g_deferredDmacContext){g_deferredDmacContext=next;}
+                ~DmacContextScope(){g_deferredDmacContext=saved;}
+            } dmacContext(ctx);
+            magatamaDeliverDeferredDmac(rdram,runtime);
+        }
+        if(!intc.InterruptEligible(ctx->cop0_status))return;
+    } else {
+        if(!intc.InterruptEligible(ctx->cop0_status))return;
+        magatamaDeliverDeferredDmac(rdram,runtime);
+    }
     if(intc.ReadStat()&2)owner.timers().latch_holds_on_eligible_sbus_intc_exception_at(owner.now());
     std::vector<IrqHandlerInfo> handlers;
     const uint32_t pending=intc.Read().pending;
@@ -473,6 +511,13 @@ bool gate3HasTemporalWake(R5900Context* ctx,PS2Runtime* runtime) {
 
             try
             {
+                // Worker completion can wake an IRQ while all parents are parked.
+                // Keep the existing eligibility gate and use the admitted IRQ context.
+                if ((cause==3 || cause==4) && g_deferredDmacContext &&
+                    std::getenv("MAGATAMA_IPU_WORKER_TIMING") && std::getenv("MAGATAMA_IPU_WORKER_TIMING")[0]=='1') {
+                    runtime->gate3RunCallbackV1(g_deferredDmacContext,info.handler,info.gp,cause,info.arg,0,true,0);
+                    continue;
+                }
                 const uint32_t stackTop = getAsyncHandlerStackTop(runtime);
                 if (stackTop == 0u)
                 {
@@ -852,6 +897,11 @@ bool gate3HasTemporalWake(R5900Context* ctx,PS2Runtime* runtime) {
             std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
             g_enabled_dmac_mask |= (1u << cause);
         }
+        if(timedIpuWorkerEnabled() && runtime && cause<10) {
+            const auto state=runtime->memory().dmacInterruptSnapshotV1();
+            if(!(state.status&(1u<<(cause+16))))runtime->memory().write32(0x1000e010u,1u<<(cause+16));
+            ctx->cop0_status|=0x800u;
+        }
         setReturnS32(ctx, KE_OK);
     }
 
@@ -867,6 +917,10 @@ bool gate3HasTemporalWake(R5900Context* ctx,PS2Runtime* runtime) {
         {
             std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
             g_enabled_dmac_mask &= ~(1u << cause);
+        }
+        if(timedIpuWorkerEnabled() && runtime && cause<10) {
+            const auto state=runtime->memory().dmacInterruptSnapshotV1();
+            if(state.status&(1u<<(cause+16)))runtime->memory().write32(0x1000e010u,1u<<(cause+16));
         }
         setReturnS32(ctx, KE_OK);
     }

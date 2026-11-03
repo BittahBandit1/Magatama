@@ -670,6 +670,7 @@ public:
     bool directGpuPresentationActive() const;
     bool presentationStats(rrv::gsbackend::PresentationStats &stats, std::string *error);
     uint64_t gsFieldTransitionCount() const { return m_gsBackend.fieldTransitionCount(); }
+    void noteOriginalFrameDelivery(const magatama::original_frame::Delivery& delivery);
 #if !defined(PS2X_RRV_FIELD_ONLY)
     // True only for an active PCSX2 bridge that explicitly accepted the
     // progressive FullFrame capability.  Used during startup to arm the

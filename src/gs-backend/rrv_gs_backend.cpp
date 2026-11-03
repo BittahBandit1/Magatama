@@ -1,4 +1,7 @@
 #include "rrv_gs_backend.h"
+#include "rrv_nocturne_aspect.h"
+#include "rrv_nocturne_frame_trace.h"
+#include "rrv_mac_qos.h"
 #if !defined(RRV_GS_TEST_FAKE_BRIDGE_PATH)
 #include "rrv_resource_package.h"
 #endif
@@ -358,6 +361,19 @@ void Backend::BridgeImageDeleter::operator()(BridgeImage *image) const noexcept
     delete image;
 }
 
+struct Backend::OriginalPresentation
+{
+    using PlanFn = int (*)(void*, uint64_t, uint64_t, uint32_t, uint32_t, char*, uint32_t);
+    PlanFn setPlan = nullptr;
+    magatama::original_frame::PairTracker tracker;
+    magatama::original_frame::Selector selector;
+    magatama::original_frame::Snapshot source{};
+    magatama::original_frame::Decision decision{true,1};
+    std::FILE* trace = nullptr;
+    uint32_t rows = 0;
+    ~OriginalPresentation() { if (trace) std::fclose(trace); }
+};
+
 Backend::Backend() = default;
 
 Backend::~Backend()
@@ -379,6 +395,14 @@ bool Backend::initialize(const InitializeOptions &options, std::string *error)
     std::lock_guard<std::mutex> lock(m_mutex);
     shutdownUnlocked();
     resetEpochBookkeepingUnlocked();
+    if (const char* value=std::getenv("MAGATAMA_ORIGINAL_PRESENT"); value && std::strcmp(value,"1")==0)
+    {
+        if (options.rendererKind!=RendererKind::Metal || options.presentationMode!=PresentationMode::DirectGpu)
+            return setError(error,"Original-frame presentation is experimental and currently requires direct Metal");
+        m_originalPresentation=std::make_unique<OriginalPresentation>();
+    }
+    if(magatama::aspect::target.load(std::memory_order_relaxed)>0.f)
+        magatama::aspect::filters().reset(this);
     const char *execution = std::getenv("RRV_GS_EXECUTION");
     m_workerVerify = std::getenv("RRV_GS_WORKER_VERIFY") != nullptr;
     m_verifySubmitted = m_verifyConsumed = 0;
@@ -469,6 +493,9 @@ bool Backend::loadBridge(const InitializeOptions &options, std::string *error)
         m_destroy = reinterpret_cast<DestroyFn>(required("rrv_pcsx2_gs_bridge_destroy"));
         m_submit = reinterpret_cast<SubmitFn>(required("rrv_pcsx2_gs_bridge_submit"));
         m_vsync = reinterpret_cast<VsyncFn>(required("rrv_pcsx2_gs_bridge_vsync"));
+        if (m_originalPresentation)
+            m_originalPresentation->setPlan = reinterpret_cast<OriginalPresentation::PlanFn>(
+                required("rrv_pcsx2_gs_bridge_set_original_present_plan"));
         m_snapshot = reinterpret_cast<SnapshotFn>(required("rrv_pcsx2_gs_bridge_snapshot"));
         m_resize = reinterpret_cast<ResizeFn>(required("rrv_pcsx2_gs_bridge_resize"));
         m_capture = reinterpret_cast<CaptureFn>(required("rrv_pcsx2_gs_bridge_capture"));
@@ -550,6 +577,7 @@ bool Backend::loadBridge(const InitializeOptions &options, std::string *error)
         }
         m_worker = std::make_unique<rrv::gs::Worker>(rrv::gs::Worker::Limits{},
             [this](const std::function<void()>& command) {
+                rrv::macInteractiveQos();
                 struct Invocation {
                     const std::function<void()>* command;
                     std::exception_ptr failure;
@@ -703,6 +731,7 @@ void Backend::shutdownUnlocked()
     }
     else if (m_bridge && m_destroy)
         m_destroy(m_bridge);
+    magatama::aspect::filters().remove(this);
     m_ownerCommand = nullptr;
     m_pumpMain = nullptr;
     m_bridge = nullptr;
@@ -710,6 +739,7 @@ void Backend::shutdownUnlocked()
     m_destroy = nullptr;
     m_submit = nullptr;
     m_vsync = nullptr;
+    m_originalPresentation.reset();
     m_snapshot = nullptr;
     m_resize = nullptr;
     m_capture = nullptr;
@@ -1064,6 +1094,12 @@ bool Backend::submit(uint32_t pathId, const uint8_t *gifBytes, uint32_t sizeByte
         return setError(error, "invalid post-arbitration GIF packet for PCSX2 GS bridge");
     }
 
+    // Explicit Nocturne enhancement, disabled unless its product config opted
+    // in. Retain packet sizes/order/control writes and record the bytes that
+    // actually reach the renderer. Worker paths still take their owned copy.
+    if (const float ratio = magatama::aspect::target.load(std::memory_order_relaxed); ratio > 0.f)
+        gifBytes = magatama::aspect::filters().get(this).apply(pathId, gifBytes, sizeBytes, ratio);
+
     std::array<char, kErrorCapacity> detail{};
     if (bridgeDiagVerbose())
         std::fprintf(stderr, "[gs-backend:submit] begin path=%u bytes=%u\n", pathId, sizeBytes);
@@ -1316,8 +1352,13 @@ bool Backend::fieldTransition(const uint64_t *regs19, uint64_t fieldIndex, uint3
                                                        fieldRegs.data(), sizeof(fieldRegs)) : 0;
     auto consumeField = [this, fieldRegs, fieldIndex, fieldParity, verification, &detail] {
         verifyConsume(verification, 2 + fieldParity, fieldIndex, fieldRegs.data(), sizeof(fieldRegs));
-        return m_vsync(m_bridge, fieldRegs.data(), fieldIndex, fieldParity,
-                       detail.data(), static_cast<uint32_t>(detail.size()));
+        if (rrv::nocturne_frame_trace::trace().enabled())
+            rrv::nocturne_frame_trace::trace().field(fieldIndex);
+        if (!applyOriginalPresentation(fieldIndex,detail.data(),static_cast<uint32_t>(detail.size()))) return 0;
+        const int result=m_vsync(m_bridge, fieldRegs.data(), fieldIndex, fieldParity,
+                                 detail.data(), static_cast<uint32_t>(detail.size()));
+        if (result) recordOriginalPresentation(fieldIndex);
+        return result;
     };
     if (deferred)
     {
@@ -1329,9 +1370,14 @@ bool Backend::fieldTransition(const uint64_t *regs19, uint64_t fieldIndex, uint3
             std::array<char, kErrorCapacity> ownerDetail{};
             verifyConsume(verification, 2 + fieldParity, fieldIndex, fieldRegs.data(), sizeof(fieldRegs));
             prepare(fieldRegs.data());
+            if (rrv::nocturne_frame_trace::trace().enabled())
+                rrv::nocturne_frame_trace::trace().field(fieldIndex);
+            if (!applyOriginalPresentation(fieldIndex,ownerDetail.data(),static_cast<uint32_t>(ownerDetail.size())))
+                throw std::runtime_error("Original presentation plan failed: "+bridgeError("plan",ownerDetail));
             if (m_vsync(m_bridge, fieldRegs.data(), fieldIndex, fieldParity, ownerDetail.data(),
                         static_cast<uint32_t>(ownerDetail.size())) == 0)
                 throw std::runtime_error("PCSX2 GS bridge field transition failed: " + bridgeError("vsync", ownerDetail));
+            recordOriginalPresentation(fieldIndex);
             uint64_t csr = 0u, siglblid = 0u;
             if (m_readback(m_bridge, &csr, &siglblid, ownerDetail.data(),
                            static_cast<uint32_t>(ownerDetail.size())) == 0)
@@ -1411,10 +1457,79 @@ bool Backend::fieldTransition(const uint64_t *regs19, uint64_t fieldIndex, uint3
     return true;
 }
 
+void Backend::noteOriginalFrameDelivery(const magatama::original_frame::Delivery& delivery)
+{
+    if (!m_originalPresentation) return;
+    auto publish=[this,delivery] { m_originalPresentation->tracker.deliver(delivery); };
+    // VU and GS packets already in flight remain ahead of this sideband.
+    // The next field receives the metadata through the same FIFO ordering.
+    if (readbackDeferred()) flushSplitBatch();
+    if (m_worker && !ownerDirect()) m_worker->submit(std::move(publish),sizeof(delivery));
+    else publish();
+}
+
+bool Backend::applyOriginalPresentation(uint64_t field, char* error, uint32_t capacity)
+{
+    if (!m_originalPresentation) return true;
+    auto& p=*m_originalPresentation;
+    p.source=p.tracker.snapshot();
+    p.decision=p.selector.field(field,p.source,m_renderMode==rrv::gs::GsRenderMode::FullFrame,
+        magatama::original_frame::hostMenu.load(std::memory_order_acquire),
+        magatama::original_frame::fastForward.load(std::memory_order_acquire));
+    // Experimental interpolation supplies render-only half steps at the original
+    // field cadence. It never changes the guest/GS execution rate.
+    static const bool interpolate60=[] {const char* v=std::getenv("MAGATAMA_INTERPOLATE");return v&&std::strcmp(v,"60")==0;}();
+    if(interpolate60)p.decision={true,1};
+    return p.setPlan(m_bridge,field,p.source.completed,p.decision.present?1u:0u,
+                     p.decision.fields_per_present,error,capacity)!=0;
+}
+
+void Backend::recordOriginalPresentation(uint64_t field)
+{
+    if (!m_originalPresentation) return;
+    auto& p=*m_originalPresentation;
+    // Configure on the serialized owner, after startup; diagnostics only.
+    if (!p.rows && !p.trace) {
+        const char* path=std::getenv("MAGATAMA_ORIGINAL_PRESENT_TRACE");
+        if (path && *path) {
+            p.trace=std::fopen(path,"w");
+            if (!p.trace) throw std::runtime_error("Could not open original presentation trace");
+            std::setvbuf(p.trace,nullptr,_IOFBF,65536);
+            std::fprintf(p.trace,"# host_ns field source_generation source_field supported ready planned_present fields_per_present accepted_presents\n");
+        } else { p.rows=32768; return; }
+    }
+    if (!p.trace || p.rows>=32768) return;
+    BridgeStats stats{sizeof(BridgeStats),0,0,0,0,0,0,0,0};
+    std::array<char,kErrorCapacity> error{};
+    if (!m_stats(m_bridge,&stats,error.data(),static_cast<uint32_t>(error.size())))
+        throw std::runtime_error("Original presentation stats failed: "+bridgeError("stats",error));
+    const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::fprintf(p.trace,"%lld %llu %llu %llu %d %d %d %u %llu\n",static_cast<long long>(ns),
+        static_cast<unsigned long long>(field),static_cast<unsigned long long>(p.source.completed),
+        static_cast<unsigned long long>(p.source.field),int(p.source.supported),int(p.source.ready),
+        int(p.decision.present),p.decision.fields_per_present,
+        static_cast<unsigned long long>(stats.direct_gpu_presents));
+    ++p.rows;
+}
+
 uint64_t Backend::ownerPost(std::function<void()> command, size_t bytes, size_t fields)
 {
     if (!m_worker)
         throw std::logic_error("GS owner stream requires RRV_GS_EXECUTION=worker-sync");
+    static const bool audioTrace = [] { const char* v = std::getenv("MAGATAMA_AUDIO_TRACE");
+        return v && std::strcmp(v, "1") == 0; }();
+    if (audioTrace) {
+        command = [work = std::move(command), bytes, fields] {
+            const auto begin = std::chrono::steady_clock::now();
+            work();
+            const auto end = std::chrono::steady_clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(end-begin).count();
+            if (ms > 10)
+                std::fprintf(stderr, "[audio-owner-trace] host=%.6f work_ms=%.3f bytes=%zu fields=%zu\n",
+                    std::chrono::duration<double>(begin.time_since_epoch()).count(), ms, bytes, fields);
+        };
+    }
     if (m_vuWorker)
         return m_vuWorker->submit([this, command = std::move(command)] {
             command();
@@ -1455,7 +1570,8 @@ bool Backend::startVuSplit(ReadbackSink sink, std::string *error)
     m_readbackSink = std::move(sink);
     rrv::gs::Worker::Limits limits;
     limits.threadName = "rrv-vu1";
-    m_vuWorker = std::make_unique<rrv::gs::Worker>(limits);
+    m_vuWorker = std::make_unique<rrv::gs::Worker>(limits,
+        [](const std::function<void()>& command){rrv::macInteractiveQos();command();});
     return true;
 }
 

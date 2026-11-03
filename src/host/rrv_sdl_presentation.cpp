@@ -3,6 +3,8 @@
 #include "rrv_display_refresh.h"
 #include "rrv_pad_slots.h"
 #include "rrv_keyboard_pad.h"
+#include "rrv_nocturne_aspect.h"
+#include "rrv_nocturne_original_frame.h"
 
 // Provided by the PS2 runtime's real-time pacer; weak so presentation-only test tools still link.
 #if defined(_MSC_VER)
@@ -28,6 +30,7 @@ extern "C" __attribute__((weak)) void rrv_free_camera_stick(float x, float y);
 #endif
 #include "runtime/host_pad.h"
 #include "fukami_app.h"
+#include "fukami_app_common.h"
 #include "fukami_menu.h"
 // Plain C ABI header: key codes and rrv_pcsx2_gs_bridge_set_overlay's type.
 #include "../../tools/pcsx2-gs-bridge/rrv_pcsx2_gs_bridge.h"
@@ -993,7 +996,7 @@ namespace
 {
 // Gate 7 aspect/UI: the window the product opens. RRV_WINDOW_SIZE=WxH (logical
 // points) wins; otherwise the window takes the shape of RRV_PCSX2_GS_ASPECT
-// (16:9, 16:10 or 21:9 when set to one of those, else 4:3) at 80% of the
+// (16:9, 16:10, 21:9 or 32:9 when set to one of those, else 4:3) at 80% of the
 // usable display height, rounded down
 // to a multiple of 8 and never below 640x480. The picture itself is fitted by
 // PCSX2 (see the bridge), so any size is valid; this only picks a good start.
@@ -1014,8 +1017,15 @@ void initialWindowSize(int &width, int &height)
     }
     const char *aspect = std::getenv("RRV_PCSX2_GS_ASPECT");
     int rw = 4, rh = 3;
+    // Nocturne's automatic mode starts wide, then follows the real drawable.
+    // An explicit RRV_WINDOW_SIZE above still wins.
+    if (magatama::aspect::followWindow)
+    {
+        rw = 16;
+        rh = 9;
+    }
     if (aspect && (std::strcmp(aspect, "16:9") == 0 || std::strcmp(aspect, "16:10") == 0 ||
-                   std::strcmp(aspect, "21:9") == 0))
+                   std::strcmp(aspect, "21:9") == 0 || std::strcmp(aspect, "32:9") == 0))
         std::sscanf(aspect, "%d:%d", &rw, &rh);
     SDL_Rect usable{};
     int h = 960;
@@ -1502,7 +1512,7 @@ void SdlPresentation::Impl::postStick(bool &held, bool now, uint32_t key)
     menu->post(menuKey(key, now));
 }
 
-// Esc and F1 toggle the menu, as does a controller's guide/Home button. While
+// Esc and F1 toggle the menu, as do guide/Home and PS4/PS5 touchpad clicks. While
 // it is open, keyboard, mouse and controller input go to the menu (the game's
 // pad reads neutral; see SdlHostPadBackend::menuGateLocked). Esc and B/Circle
 // are forwarded too: the menu closes a combo with them, else itself.
@@ -1540,7 +1550,8 @@ void SdlPresentation::Impl::routeMenuEvent(const SDL_Event &event)
     case SDL_CONTROLLERBUTTONUP:
     {
         const bool down = event.type == SDL_CONTROLLERBUTTONDOWN;
-        if (event.cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE)
+        if (event.cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE ||
+            event.cbutton.button == SDL_CONTROLLER_BUTTON_TOUCHPAD)
         {
             if (down)
                 toggleMenu();
@@ -1854,6 +1865,8 @@ void SdlPresentation::destroy()
         // settings file is read anew. restart() returns only on failure.
         std::fprintf(stderr, "[fukami-menu] restarting to apply settings\n");
         std::fflush(nullptr);
+        if (!fukami::app::inApp() && fukami::app::detail::terminalRestartEnabled())
+            std::exit(fukami::app::detail::kTerminalRestartExit);
         fukami::app::restart();
         std::fprintf(stderr, "[fukami-menu] restart failed; relaunch the app\n");
     }
@@ -1878,6 +1891,14 @@ void SdlPresentation::pumpEvents()
     SDL_Event event{};
     while (SDL_PollEvent(&event) != 0)
     {
+        static const bool traceFocus=[] {const char* v=std::getenv("MAGATAMA_FOCUS_TRACE");return v && std::strcmp(v,"1")==0;}();
+        if (traceFocus && event.type==SDL_WINDOWEVENT &&
+            (event.window.event==SDL_WINDOWEVENT_FOCUS_GAINED || event.window.event==SDL_WINDOWEVENT_FOCUS_LOST ||
+             event.window.event==SDL_WINDOWEVENT_HIDDEN || event.window.event==SDL_WINDOWEVENT_SHOWN ||
+             event.window.event==SDL_WINDOWEVENT_MINIMIZED || event.window.event==SDL_WINDOWEVENT_RESTORED)) {
+            const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            std::fprintf(stderr,"[focus] ns=%lld event=%u flags=0x%x\n",static_cast<long long>(ns),unsigned(event.window.event),unsigned(SDL_GetWindowFlags(m_impl->window)));
+        }
         if (event.type == SDL_QUIT ||
             (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE))
         {
@@ -1932,6 +1953,9 @@ void SdlPresentation::pumpEvents()
     }
     if (m_impl->menu)
         m_impl->serviceMenu();
+    magatama::original_frame::hostMenu.store(m_impl->menu && m_impl->menu->isOpen(), std::memory_order_release);
+    magatama::original_frame::fastForward.store(RRV_FAST_FORWARD_AVAILABLE && rrv_fast_forward_active()!=0,
+                                               std::memory_order_release);
     const bool fullscreen = windowFullscreen(m_impl->window);
     if (fullscreen != m_impl->lastFullscreen)
     {
@@ -2126,6 +2150,7 @@ bool SdlPresentation::currentSurface(rrv::gsbackend::NativeSurface *surface) con
     drawableSize(m_impl->window, &width, &height);
     if (width <= 0 || height <= 0)
         return false;
+    magatama::aspect::surface(uint32_t(width), uint32_t(height));
     int logicalWidth = 0;
     int logicalHeight = 0;
     SDL_GetWindowSize(m_impl->window, &logicalWidth, &logicalHeight);

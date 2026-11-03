@@ -4,6 +4,7 @@
 #include "patches.h"
 #include "rrv_gs_record_hooks.h"
 #include "rrv_gs_backend.h"
+#include "rrv_nocturne_aspect.h"
 #include "rrv_m2_neutrality.h"
 #include "rrv_m2_causal_trace.h"
 #include "rrv_sdl_presentation.h"
@@ -11,6 +12,7 @@
 #include "rrv_elf_identity.h"
 #include "fukami_app.h"
 #include "fukami_settings.h"
+#include "magatama_display_settings.h"
 #if defined(__linux__)
 #include "rrv_thread_cpu_log.h"
 #endif
@@ -1005,6 +1007,39 @@ int main(int argc, char **argv)
 #endif
         if (!rrv::product::verifyGameElfIdentity(elf, RRV_GAME_ELF_SHA256, std::cerr))
             return 3;
+        // The Terminal launcher and Escape menu share one persistent file.
+        // Read it before creating the window/renderer; never change a running
+        // render target or the main camera halfway through a field.
+        const auto displayIni = fukami::app::iniPath();
+        const auto displayDoc = displayIni.empty() ? fukami::settings::IniDocument{} :
+            fukami::settings::IniDocument::load(displayIni).value_or(fukami::settings::IniDocument{});
+        const auto display = magatama::displaySettings(displayDoc, [](const char* name){ return std::getenv(name); });
+        const auto setDisplayEnv = [](const char* name, const std::string& value) {
+#if defined(_WIN32)
+            if (_putenv_s(name, value.c_str()) != 0)
+#else
+            if (setenv(name, value.c_str(), 1) != 0)
+#endif
+                throw std::runtime_error(std::string("cannot configure ") + name);
+        };
+        for (const auto& [name,value] : fukami::settings::magatamaSavedEnvironment(displayDoc))
+            if (!std::getenv(name.c_str())) setDisplayEnv(name.c_str(),value);
+        if (!std::getenv("RRV_GS_RENDER_MODE")) setDisplayEnv("RRV_GS_RENDER_MODE","full");
+        if (!std::getenv("RRV_PCSX2_GS_FXAA")) setDisplayEnv("RRV_PCSX2_GS_FXAA","1");
+        if (!std::getenv("MTL_HUD_ENABLED")) setDisplayEnv("MTL_HUD_ENABLED","1");
+        setDisplayEnv("MAGATAMA_ASPECT", display.aspect);
+        setDisplayEnv("RRV_PCSX2_GS_FULL_SCALE", display.scale);
+        if (const char* fit = magatama::aspect::configure(display.aspect.c_str()))
+        {
+#if defined(_WIN32)
+            if (_putenv_s("RRV_PCSX2_GS_ASPECT", fit) != 0)
+#else
+            if (setenv("RRV_PCSX2_GS_ASPECT", fit, 1) != 0)
+#endif
+                throw std::runtime_error("cannot configure Nocturne picture fit");
+            std::cerr << "[nocturne-aspect] mode=" << std::getenv("MAGATAMA_ASPECT")
+                      << " HUD=centered-4:3 projection=original-SDF\n";
+        }
         const bool m2NeutralityEnabled = rrv::m2neutral::enabled();
         const std::filesystem::path executable = std::filesystem::absolute(argv[0]);
         std::filesystem::current_path(executable.parent_path());

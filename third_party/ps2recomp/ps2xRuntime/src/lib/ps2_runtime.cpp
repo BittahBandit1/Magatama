@@ -3080,6 +3080,13 @@ void PS2Runtime::serviceDirectPresentation()
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
 }
 
+void PS2Runtime::noteOriginalFrameDelivery(const magatama::original_frame::Delivery& delivery)
+{
+    if (!m_gsBackend.originalPresentationRequested()) return;
+    m_memory.ownerPostV1([this, delivery] { m_gsBackend.noteOriginalFrameDelivery(delivery); },
+                         sizeof(delivery), 0, false);
+}
+
 void PS2Runtime::captureDirectPresentationIfRequested(uint64_t fieldIndex)
 {
     static const char *dumpDirectory = std::getenv("RRV_PRESENT_DUMP");

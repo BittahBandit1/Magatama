@@ -6,9 +6,13 @@
 #include "fukami_app.h"
 #include "fukami_menu.h"
 #include "fukami_settings.h"
+#include "magatama_display_settings.h"
+#include "../src/host/rrv_audio_output.h"
+#include "../src/gs-backend/rrv_nocturne_aspect.h"
 
 #include "../tools/pcsx2-gs-bridge/rrv_pcsx2_gs_bridge.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -66,6 +70,7 @@ std::map<std::string, int> g_intSet;    // label -> value a widget reports as ch
 std::map<std::string, float> g_floatSet;
 std::string g_press;                    // button label to report as activated
 bool g_popup = false;
+bool g_rejectRender = false;
 
 void record(const std::string &call) { g_calls.push_back(call); }
 bool called(const std::string &prefix)
@@ -123,7 +128,7 @@ RrvPcsx2GsBridgeUi fakeUi()
     ui.text_wrapped = [](const char *text) { record(std::string("wrapped ") + text); };
     ui.text_warning = [](const char *text) { record(std::string("warning ") + text); };
     ui.separator = [] {};
-    ui.same_line = [] {};
+    ui.same_line = [] { record("same-line"); };
     ui.spacing = [] {};
     ui.push_id = [](int) {};
     ui.pop_id = [] {};
@@ -165,6 +170,9 @@ RrvPcsx2GsBridgeUi fakeUi()
     ui.set_aspect = [](const char *value) {
         record(std::string("set-aspect ") + value);
         return 1;
+    };
+    ui.set_render_option = [](const char* key,const char* value) {
+        record(std::string("set-render ")+key+" "+value);return g_rejectRender ? 0 : 1;
     };
     ui.set_integer_scaling = [](int on) { record("set-integer " + std::to_string(on)); };
     ui.set_fxaa = [](int on) { record("set-fxaa " + std::to_string(on)); };
@@ -239,25 +247,27 @@ void testDrawsEveryMenuSetting(const fs::path &ini)
     menu.setAvailable(true);
     menu.open();
     frame(menu);
-    expect(called("clear") && called("begin Fukami 1") && called("default-focus") && called("end"),
+    expect(called("clear") && called("begin Magatama 1") && called("default-focus") && called("end"),
            "first open frame clears input, appears, focuses Resume");
     int inMenu = 0;
     for (const auto &spec : fukami::settings::schema())
     {
-        if (!spec.inMenu)
+        if (!spec.inMenu || (spec.section=="game" && spec.key=="logging" && !fukami::app::inApp()))
             continue;
         ++inMenu;
         expect(called("checkbox " + std::string(spec.label)) || called("combo " + std::string(spec.label)) ||
-                   called("slider " + std::string(spec.label)) || called("slider-float " + std::string(spec.label)),
+                   called("slider " + std::string(spec.label)) || called("slider-float " + std::string(spec.label)) ||
+                   (spec.section == "audio" && spec.key == "mute" && called("button Mute")),
                "row drawn for " + std::string(spec.label));
     }
-    expect(count("checkbox ") + count("combo ") + count("slider ") + count("slider-float ") == inMenu,
+    expect(count("checkbox ") + count("combo ") + count("slider ") + count("slider-float ") + count("button Mute") == inMenu,
            "exactly one row per menu setting");
-    for (const char *section : {"section Display", "section Rendering", "section Input", "section Game",
+    for (const char *section : {"section Audio", "section Display", "section Rendering", "section Input", "section Game",
                                 "section Performance"})
         expect(called(section), std::string("section drawn: ") + section);
-    expect(called("slider Internal resolution 4 1..8"), "integer slider shows the file's value and range");
-    expect(called("combo Widescreen 16:9 of 4"), "combo shows the file's choice");
+    expect(called("slider Rendering resolution 4 1..8"), "integer slider shows the file's value and range");
+    expect(called("combo Aspect ratio 4:3 of 6"), "Nocturne ratios available in Escape menu");
+    expect(!called("combo Picture fit") && !called("combo Widescreen"), "legacy fit and RR5 camera controls stay hidden");
     expect(called("combo Texture filtering PS2 (stock) of 2"), "the texture filter shows the stock choice by name");
     expect(called("checkbox Split VU1 / GS 1") && called("slider Pacer spin (ms) 0 0..17"),
            "the VU1/GS split and the pacer spin are menu settings (schema defaults without a default ini)");
@@ -266,8 +276,9 @@ void testDrawsEveryMenuSetting(const fs::path &ini)
     expect(called("wrapped Settings: " + ini.string()), "settings file path shown");
     expect(!called("warning Restart"), "nothing pending at open");
     expect(!called("section Files"), "no Files section without folders");
+    expect(!called("checkbox Write logs"), "app-only session logger is hidden in Terminal mode");
     frame(menu);
-    expect(called("begin Fukami 0"), "later frames are not appearing");
+    expect(called("begin Magatama 0"), "later frames are not appearing");
 }
 
 void testLiveChangeSavesAndApplies(const fs::path &ini)
@@ -286,17 +297,37 @@ void testLiveChangeSavesAndApplies(const fs::path &ini)
     frame(menu);
     expect(!called("warning Restart"), "a live setting needs no restart");
 
-    // Picture fit "" (index 0) follows the ratio the game was launched with.
-    g_intSet["Picture fit"] = 0;
-    frame(menu);
-    expect(called("set-aspect 4:3"), "empty picture fit applies the launch ratio (4:3 without RRV_RR5_WIDESCREEN)");
-    g_intSet["Picture fit"] = 6; // stretch
-    frame(menu);
-    expect(called("set-aspect stretch"), "picture fit applied live");
-    expect(readFile(ini).find("aspect = stretch\n") != std::string::npos, "picture fit saved in [display]");
     g_intSet["Sharpening (CAS)"] = 40;
     frame(menu);
     expect(called("set-cas 40") && readFile(ini).find("cas = 40\n") != std::string::npos, "CAS applied and saved");
+}
+
+void testAudioControls(const fs::path& ini)
+{
+    using namespace rrv::audio;
+    fukami::menu::Menu menu(ini);
+    menu.setAvailable(true); menu.open(); frame(menu);
+    expect(called("slider Volume (%) 100 0..100") && called("button Mute"), "audio controls draw at defaults");
+    g_intSet["Volume (%)"] = 37; frame(menu);
+    expect(outputVolume() == 37 && !outputMuted(), "volume updates actual shared output state immediately");
+    g_press = "Mute"; frame(menu);
+    expect(outputMuted() && outputVolume() == 37, "mute preserves chosen volume");
+    frame(menu); expect(called("button Unmute"), "muted button offers Unmute");
+    g_intSet["Volume (%)"] = 23; frame(menu);
+    expect(outputMuted() && outputVolume() == 23, "volume can change while staying muted");
+    menu.close();
+    fukami::menu::Menu relaunched(ini);
+    expect(outputMuted() && outputVolume() == 23, "both audio choices survive a new launch");
+    relaunched.setAvailable(true); relaunched.open();
+    g_press = "Unmute"; frame(relaunched);
+    expect(!outputMuted() && outputVolume() == 23, "unmute restores the saved volume");
+    const auto saved = readFile(ini);
+    expect(saved.find("volume = 23") != std::string::npos && saved.find("mute = false") != std::string::npos,
+           "audio preferences saved without replacing unrelated settings");
+    expect(saved.find("RRV_CUSTOM = 1") != std::string::npos && !called("warning Restart"), "audio preserves unrelated preferences and needs no restart");
+    expect(!relaunched.takeRestartRequest() && !relaunched.takeQuitRequest(), "audio never restarts or quits the game");
+    g_intSet["Volume (%)"] = 101; frame(relaunched);
+    expect(outputVolume() == 23 && readFile(ini) == saved, "invalid volume cannot alter output or saved settings");
 }
 
 void testRestartOnlyChange(const fs::path &ini)
@@ -305,29 +336,187 @@ void testRestartOnlyChange(const fs::path &ini)
     menu.setAvailable(true);
     menu.open();
     frame(menu);
-    g_intSet["Internal resolution"] = 6;
+    g_intSet["Rendering resolution"] = 6;
     frame(menu);
-    expect(readFile(ini).find("scale = 6\n") != std::string::npos, "restart-only setting saved");
+    expect(readFile(ini).find("scale = 6\n") != std::string::npos, "live rendering setting saved");
+    expect(called("set-render scale 6"), "resolution reaches renderer callback");
     frame(menu);
-    expect(called("warning Restart to apply: Internal resolution."), "restart banner names the setting");
-    expect(called("disabled-text Quit and relaunch to apply."), "no restart outside the app");
-    expect(!called("button Restart"), "no Restart button outside the app");
+    expect(!called("warning Restart"), "resolution changes need no game restart");
+    expect(!called("disabled-text Quit and relaunch to apply."), "live resolution requires no relaunch");
+    expect(called("button Restart"), "Restart remains visible next to Quit when unavailable");
     g_canRestart = true;
     g_press = "Restart";
     frame(menu);
-    expect(called("button Restart") && menu.takeRestartRequest(), "Restart button requests a restart in the app");
+    expect(called("button Restart") && !menu.takeRestartRequest(), "Restart waits for unsaved-progress confirmation");
+    g_press = "Yes";
+    frame(menu);
+    expect(menu.takeRestartRequest() && !menu.takeQuitRequest(), "confirmed Restart requests only a restart");
+    menu.open();
+    frame(menu);
     g_canRestart = false;
-    g_intSet["Internal resolution"] = 4;
+    g_intSet["Rendering resolution"] = 4;
     frame(menu);
     frame(menu);
     expect(!called("warning Restart"), "back to the launch value: nothing pending");
 
-    g_floatSet["Car detail distance"] = 2.46f;
+    expect(!called("slider-float Car detail distance"), "RR5-specific car controls remain hidden in Magatama");
+}
+
+void testRendererReadback(const fs::path& ini)
+{
+    fukami::menu::Menu menu(ini);menu.setAvailable(true);menu.open();auto ui=fakeUi();
+    ui.get_render_option=[](const char* key)->const char* {
+        if(std::string_view(key)=="scale")return "2";
+        if(std::string_view(key)=="mipmap")return "true";
+        return nullptr;
+    };
+    g_calls.clear();fukami::menu::Menu::frameCallback(&menu,&ui);
+    expect(called("slider Rendering resolution 2 1..8"),"actual renderer scale wins over saved/requested value");
+    expect(called("checkbox Mipmaps 1"),"actual renderer mipmap value is shown");
+    const auto before=readFile(ini);
+    g_calls.clear();fukami::menu::Menu::frameCallback(&menu,&ui);
+    expect(readFile(ini)==before,"renderer observation does not rewrite user preferences");
+    expect(!called("warning Restart"),"actual live renderer values do not create restart warnings");
+}
+
+void testEffectiveTerminalDefaults(const fs::path& ini)
+{
+    std::vector<std::pair<std::string,std::string>> previous;
+    const char* names[]={"MAGATAMA_DISC","RRV_VU1GS_SPLIT","RRV_PCSX2_GS_FULL_HWMIPMAP"};
+    for(const char* n:names){const char* v=std::getenv(n);previous.emplace_back(n,v?v:"");}
+    setenv("MAGATAMA_DISC","test-only",1);unsetenv("RRV_VU1GS_SPLIT");unsetenv("RRV_PCSX2_GS_FULL_HWMIPMAP");
+    std::ofstream(ini,std::ios::trunc)<<"";
+    fukami::menu::Menu menu(ini);menu.setAvailable(true);menu.open();frame(menu);
+    expect(called("checkbox Split VU1 / GS 0"),"Terminal menu shows actual unsplit runtime default");
+    expect(called("checkbox Mipmaps 1"),"Terminal menu shows actual mipmap runtime default");
+    expect(!called("warning Restart"),"effective defaults do not falsely claim restart pending");
+    for(const auto& [n,v]:previous){if(v.empty())unsetenv(n.c_str());else setenv(n.c_str(),v.c_str(),1);}
+}
+
+void testLiveRendererControls(const fs::path& ini)
+{
+    fukami::menu::Menu menu(ini);menu.setAvailable(true);menu.open();frame(menu);
+    struct Change { const char* label;const char* key;int widget;const char* value; };
+    for (const auto& c : std::vector<Change>{
+        {"Rendering resolution","scale",1,"1"},
+        {"Rendering resolution","scale",8,"8"},
+        {"Rendering resolution","scale",4,"4"},
+        {"Edge anti-aliasing (AA1)","aa1",0,"false"},
+        {"Edge anti-aliasing (AA1)","aa1",1,"true"},
+        {"Anisotropic filtering","aniso",4,"16"},
+        {"Texture filtering","texture_filter",1,"bilinear"},
+        {"2D filtering","sprite_filter",1,"ps2"},
+        {"Mipmaps","mipmap",1,"true"}}) {
+        g_intSet[c.label]=c.widget;frame(menu);
+        expect(called(std::string("set-render ")+c.key+" "+c.value),"actual renderer callback: "+std::string(c.key));
+        frame(menu);expect(!called("warning Restart"),"renderer change has no restart marker: "+std::string(c.key));
+        expect(!menu.takeRestartRequest()&&!menu.takeQuitRequest(),"live renderer change preserves running game");
+    }
+    const auto before=readFile(ini);
+    g_rejectRender=true;g_intSet["Rendering resolution"]=2;frame(menu);g_rejectRender=false;
+    expect(readFile(ini)==before,"renderer rejection does not persist a false live value");
+    expect(called("warning Could not apply Rendering resolution"),"renderer failure is visible");
+    auto old=fakeUi();old.struct_size=offsetof(RrvPcsx2GsBridgeUi,set_render_option);
+    g_calls.clear();g_intSet["Rendering resolution"]=3;
+    fukami::menu::Menu::frameCallback(&menu,&old);
+    expect(called("begin"),"previous bridge UI prefix still draws the menu");
+    expect(readFile(ini)==before,"previous bridge cannot falsely accept unsupported live rendering");
+    // Reselecting auto uses the drawable already observed, without requiring
+    // a resize event to update the centered HUD/projection ratio.
+    magatama::aspect::surface(3440,1440);
+    g_intSet["Aspect ratio"]=1;frame(menu);
+    expect(std::abs(magatama::aspect::target.load()-3440.f/1440.f)<1e-6,"auto aspect updates immediately to existing window");
+    expect(called("set-aspect stretch"),"world/HUD and presentation aspect update together");
+}
+
+void testMenuRestartAudit(const fs::path& ini)
+{
+    using namespace fukami::settings;
+    for(const auto& spec:schema()){
+        if(!spec.inMenu || (spec.section=="game" && spec.key=="logging"))continue;
+        const bool live=fukami::menu::appliesLive(spec.section,spec.key);
+        expect(live==(spec.apply==Apply::live),"restart label matches actual handler: "+std::string(spec.key));
+        std::cout << "AUDIT " << spec.section << "." << spec.key << " | " << spec.label << " | " << (live?"Live":"Restart") << "\n";
+    }
+    fukami::menu::Menu menu(ini);menu.setAvailable(true);menu.open();frame(menu);
+    g_intSet["Integer scaling"]=1;frame(menu);
+    expect(called("set-integer 1"),"integer scaling routes to bridge immediately");
+    g_intSet["Metal HUD"]=0;frame(menu);
+    expect(menu.takeMetalHudRequest()==0,"Metal HUD queues host request immediately");
+    frame(menu);expect(!called("warning Restart"),"live display changes never produce restart banner");
+    const auto saved=magatamaSavedEnvironment(*IniDocument::load(ini));
+    auto get=[&](const std::string& key){for(auto& pair:saved)if(pair.first==key)return pair.second;return std::string();};
+    expect(get("RRV_PCSX2_GS_INTEGER_SCALING")=="1"&&get("MTL_HUD_ENABLED")=="0","live settings also survive Terminal restart");
+    for (auto section:{"rendering","input","timing","display"}) {
+        for(const auto& spec:schema()){
+            if(spec.section!=section || !spec.inMenu || spec.key=="scale" || spec.key=="nocturne_aspect")continue;
+            IniDocument doc;const std::string v=spec.kind==Kind::boolean?"false":(spec.choices.empty()?"0":std::string(spec.choices.back()));
+            if(!valid(spec,v))continue;
+            doc.set(spec.section,spec.key,v);const auto env=magatamaSavedEnvironment(doc);
+            expect(env.size()==1,"saved startup binding exists for "+std::string(spec.key));
+            if(!env.empty())expect(env[0].second==(spec.kind==Kind::boolean?"0":v),"saved startup value including false/off is exact");
+        }
+    }
+    expect(magatamaSavedEnvironment(IniDocument::parse("[rendering]\naniso=999\nfxaa=maybe\n")).empty(),"invalid saved values never reach renderer");
+}
+
+void testRestartTopRow(const fs::path& ini)
+{
+    g_canRestart = true;
+    fukami::menu::Menu menu(ini);
+    menu.setAvailable(true); menu.open(); frame(menu);
+    auto quit = std::find(g_calls.begin(), g_calls.end(), "button Quit");
+    auto restart = std::find(g_calls.begin(), g_calls.end(), "button Restart");
+    expect(quit != g_calls.end() && restart != g_calls.end() && quit < restart,
+           "Restart is after Quit even without pending settings");
+    expect(quit != g_calls.end() && restart != g_calls.end() && quit < restart &&
+           std::find(quit, restart, "same-line") != restart,
+           "Restart follows Quit on the same row");
+    expect(count("button Restart") == 1, "only one Restart button is drawn");
+    g_press = "Restart"; frame(menu);
+    expect(!menu.takeRestartRequest(), "opening restart confirmation does not relaunch");
     frame(menu);
-    expect(readFile(ini).find("car_lod = 2.5\n") != std::string::npos, "number saved with one decimal");
-    g_floatSet["Car detail distance"] = 4.0f;
-    frame(menu);
-    expect(readFile(ini).find("car_lod = 4\n") != std::string::npos, "whole number saved without .0");
+    expect(called("begin Restart 1") && called("default-focus") && called("button No"),
+           "restart confirmation starts on No");
+    g_press = "No"; frame(menu); frame(menu);
+    expect(menu.isOpen() && !menu.takeRestartRequest(), "No returns to game menu without restarting");
+    g_press = "Restart"; frame(menu);frame(menu);
+    menu.post(key(RRV_PCSX2_GS_UI_KEY_ESCAPE,true));frame(menu);
+    expect(menu.isOpen() && !menu.takeRestartRequest(), "Escape cancels restart without closing game menu");
+    g_canRestart = false;
+    g_press = "Restart";frame(menu);
+    expect(!menu.takeRestartRequest(), "unavailable launch mode cannot restart");
+}
+
+void testNocturneDisplay(const fs::path& ini)
+{
+    auto neutral = [](const char*) -> const char* { return nullptr; };
+    using fukami::settings::IniDocument;
+    auto fallback = magatama::displaySettings(IniDocument{}, neutral);
+    expect(fallback.aspect == "off" && fallback.scale == "8", "existing no-file Magatama defaults preserved");
+    auto invalid = magatama::displaySettings(IniDocument::parse("[display]\nnocturne_aspect = bad\n[rendering]\nscale = 99\n"), neutral);
+    expect(invalid.aspect == "off" && invalid.scale == "8", "invalid saved display options fall back safely");
+    const auto saved = readFile(ini);
+    fukami::menu::Menu menu(ini);
+    menu.setAvailable(true);menu.open();frame(menu);
+    for (int index=0; index<int(fukami::settings::find("display", "nocturne_aspect")->choices.size()); ++index) {
+        g_intSet["Aspect ratio"] = index; frame(menu);frame(menu);
+        const auto doc = IniDocument::load(ini);
+        const auto launch = magatama::displaySettings(*doc, neutral);
+        const auto& spec = *fukami::settings::find("display", "nocturne_aspect");
+        expect(launch.aspect == spec.choices[index], "each menu ratio persists into the next product launch");
+        expect(!called("set-aspect"), "ratio never changes fit alone without the camera/HUD projection");
+    }
+    for (int scale : {1,4,8}) {
+        g_intSet["Rendering resolution"] = scale; frame(menu);
+        const auto launch = magatama::displaySettings(*IniDocument::load(ini), neutral);
+        expect(launch.scale == std::to_string(scale), "resolution slider persists into product launch");
+    }
+    auto overridden = magatama::displaySettings(*IniDocument::load(ini), [](const char* name) -> const char* {
+        return std::string(name) == "MAGATAMA_ASPECT" ? "16:10" : "2";
+    });
+    expect(overridden.aspect == "16:10" && overridden.scale == "2", "explicit launch/replay overrides beat saved menu values");
+    std::ofstream(ini, std::ios::trunc) << saved;
 }
 
 void testBackKeys(const fs::path &ini)
@@ -358,7 +547,11 @@ void testBackKeys(const fs::path &ini)
     frame(menu);
     g_press = "Quit";
     frame(menu);
-    expect(menu.takeQuitRequest() && !menu.takeQuitRequest(), "Quit requests one clean stop");
+    expect(!menu.takeQuitRequest(), "Quit waits for existing unsaved-progress confirmation");
+    frame(menu);
+    g_press = "Yes";
+    frame(menu);
+    expect(menu.takeQuitRequest() && !menu.takeQuitRequest(), "confirmed Quit requests one clean stop");
 }
 
 void testFullscreen(const fs::path &ini)
@@ -398,7 +591,7 @@ void testPackageDefaults(const fs::path &ini)
     expect(called("combo Anisotropic filtering 8x of 5"), "a setting missing from the file shows the app default");
     expect(called("checkbox Split VU1 / GS 1") && called("slider Pacer spin (ms) 17 0..17"),
            "the Linux package case: an old file without split_gs/pacer_spin shows the split on and spin 17");
-    expect(called("slider Internal resolution 4 1..8") && called("combo Widescreen 16:9 of 4"),
+    expect(called("slider Rendering resolution 4 1..8") && called("combo Aspect ratio 4:3 of 6"),
            "settings the file has keep the file's value");
     expect(!called("warning Restart"), "an inherited default is not a pending change");
     expect(readFile(ini) == kIni, "showing the menu does not rewrite the file");
@@ -409,8 +602,8 @@ void testPackageDefaults(const fs::path &ini)
                text.find("ratio = 16:9\n") != std::string::npos,
            "a change saves that setting only; the others keep the file's values");
     frame(menu);
-    expect(called("combo Anisotropic filtering Off of 5") && called("warning Restart to apply: Anisotropic filtering."),
-           "the user's value now wins over the app default and is pending against the launch value");
+    expect(called("combo Anisotropic filtering Off of 5") && !called("warning Restart"),
+           "anisotropy applies without a restart warning");
     g_intSet["Split VU1 / GS"] = 0;
     frame(menu);
     expect(readFile(ini).find("\n[timing]\nsplit_gs = false\n") != std::string::npos,
@@ -459,7 +652,20 @@ int main()
     reset();
     testLiveChangeSavesAndApplies(ini);
     reset();
+    testAudioControls(ini);
+    reset();
     testRestartOnlyChange(ini);
+    testNocturneDisplay(ini);
+    reset();
+    testRestartTopRow(ini);
+    reset();
+    testMenuRestartAudit(ini);
+    reset();
+    testRendererReadback(ini);
+    reset();
+    testEffectiveTerminalDefaults(ini);
+    reset();
+    testLiveRendererControls(ini);
     reset();
     testBackKeys(ini);
     reset();

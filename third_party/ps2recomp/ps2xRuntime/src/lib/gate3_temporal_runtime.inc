@@ -735,6 +735,7 @@ void PS2Runtime::gate3ArmQuietV1(R5900Context* ctx) {
     if(diagnostics || !m_gate3TemporalV1 || m_gate3HardwareActiveV1 || gate3AtCutV1() || !m_gate3TimedWaitsV1.empty())return;
     auto& owner=*m_gate3TemporalV1; auto& intc=owner.intc(); const auto& gs=m_memory.gs();
     if(owner.HasReadyAlarms())return;
+    if(ps2_syscalls::magatamaTimedDmacReadyV1(ctx,this))return;
     if(m_gate3NextCdCallbackV1<m_gate3CdReadyV1.size() &&
        m_gate3CdReadyV1[m_gate3NextCdCallbackV1].start<=owner.starts())return;
     if(intc.InterruptEligible(ctx->cop0_status) && (intc.Read().pending || (intc.ReadStat()&2)))return;

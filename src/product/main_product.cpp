@@ -1024,6 +1024,11 @@ int main(int argc, char **argv)
         };
         for (const auto& [name,value] : fukami::settings::magatamaSavedEnvironment(displayDoc))
             if (!std::getenv(name.c_str())) setDisplayEnv(name.c_str(),value);
+        // Saved rendering.frame_rate arrives above as MAGATAMA_INTERPOLATE
+        // (an explicit environment value wins). Interpolation was validated with original-source presentation.
+        if (const char* rate = std::getenv("MAGATAMA_INTERPOLATE"); rate && std::strcmp(rate, "60") == 0 &&
+            !std::getenv("MAGATAMA_ORIGINAL_PRESENT"))
+            setDisplayEnv("MAGATAMA_ORIGINAL_PRESENT", "1");
         if (!std::getenv("RRV_GS_RENDER_MODE")) setDisplayEnv("RRV_GS_RENDER_MODE","full");
         if (!std::getenv("RRV_PCSX2_GS_FXAA")) setDisplayEnv("RRV_PCSX2_GS_FXAA","1");
         if (!std::getenv("MTL_HUD_ENABLED")) setDisplayEnv("MTL_HUD_ENABLED","1");

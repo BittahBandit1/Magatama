@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -55,6 +56,14 @@ inline bool modelPacket(const uint8_t* old,const uint8_t* now,float alpha,uint8_
  std::memcpy(out,now,112);if(alpha==1)return true;std::memcpy(out,m.data(),64);
  // The original lighting rows normalize each matrix column's XYZ length.
  for(unsigned j=0;j<3;++j){float n=std::sqrt(m[j]*m[j]+m[4+j]*m[4+j]+m[8+j]*m[8+j]);if(n<1e-6f)return false;for(unsigned i=0;i<3;++i){float v=m[i*4+j]/n;std::memcpy(out+64+16*i+4*j,&v,4);}}return true;
+}
+// True when two camera view packets are close enough to blend as one shot:
+// eye moved at most maxDistance and view rotation at most acos(minDot)*2.
+inline bool cameraNear(const uint8_t* old,const uint8_t* now,float maxDistance,float minDot){
+ Matrix a,b,aw,bw;std::memcpy(a.data(),old,64);std::memcpy(b.data(),now,64);
+ TRS x,y;if(!inverseAffine(a,aw)||!inverseAffine(b,bw)||!decompose(aw,x)||!decompose(bw,y))return false;
+ float dist=0,d=0;for(unsigned i=0;i<3;++i){float t=y.t[i]-x.t[i];dist+=t*t;}for(unsigned i=0;i<4;++i)d+=x.q[i]*y.q[i];
+ return dist<=maxDistance*maxDistance&&std::fabs(d)>=minDot;
 }
 inline bool cameraPacket(const uint8_t* old,const uint8_t* now,float alpha,uint8_t* out){
  Matrix a,b,aw,bw,m,mw,pa,pb;std::memcpy(a.data(),old,64);std::memcpy(b.data(),now,64);

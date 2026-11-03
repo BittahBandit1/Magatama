@@ -317,6 +317,12 @@ const std::vector<Spec> &schema()
         // [rendering]
         {"rendering", "render_mode", "Render mode", "full: progressive full frames. field: the older half-height output.",
          Kind::choice, "full", {"full", "field"}},
+        // Magatama experimental 60 FPS: render-only in-between poses for
+        // characters and camera on alternate fields (MAGATAMA_INTERPOLATE=60).
+        // Game logic, audio and input stay at the original 30 updates/second.
+        {"rendering", "frame_rate", "Frame rate (experimental)",
+         "60: characters and camera get an in-between pose every other field. Effects and 2D stay at 30. Restart to apply.",
+         Kind::choice, "30", {"30", "60"}, 0, 0, Apply::restart},
         {"rendering", "scale", "Rendering resolution", "Internal rendering scale: 1x native through 8x. Higher is sharper and uses more GPU memory.",
          Kind::integer, "4", {}, 1, 8, Apply::live},
         {"rendering", "aa1", "Edge anti-aliasing (AA1)", "PCSX2's emulation of the PS2's AA1 edge smoothing.",
@@ -462,6 +468,7 @@ std::vector<std::pair<std::string,std::string>> magatamaSavedEnvironment(const I
         {"display","integer_scaling","RRV_PCSX2_GS_INTEGER_SCALING",true},
         {"display","present_pacing","RRV_PCSX2_GS_PRESENT_PACING",true},
         {"rendering","render_mode","RRV_GS_RENDER_MODE",false},
+        {"rendering","frame_rate","MAGATAMA_INTERPOLATE",false}, // "60" enables; "30" is off
         {"rendering","aa1","RRV_PCSX2_GS_FULL_HWAA1",true},
         {"rendering","fxaa","RRV_PCSX2_GS_FXAA",true},
         {"rendering","cas","RRV_PCSX2_GS_CAS",false},
@@ -562,6 +569,7 @@ const std::map<std::string, std::string> &messages()
     static const std::map<std::string, std::string> table = {
         {"ratio", "ratio must be 4:3, 16:9, 16:10 or 21:9"},
         {"nocturne_aspect", "nocturne_aspect must be auto, 4:3, 16:9, 16:10, 21:9 or 32:9"},
+        {"frame_rate", "frame_rate must be 30 or 60"},
         {"hud", "hud must be fixed, race or stretch"},
         {"aspect", "aspect must be empty, auto, 4:3, 16:9, 16:10, 21:9, 32:9 or stretch"},
         {"window", "window must be empty or WIDTHxHEIGHT, e.g. 1920x1080"},

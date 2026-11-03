@@ -1064,6 +1064,9 @@ public:
     }
     __attribute__((noinline)) void gate3CheckpointSlowV1(R5900Context *ctx)
     {
+        // Render-only nested guest work (Magatama 60 FPS skinning) runs off
+        // the clock: no hardware/scheduler service and no thread switch.
+        if (__builtin_expect(ctx == m_gate3OffClockCtxV1, false)) return;
         {
             // The window still holds and RRV_GATE4_LAZY_VERIFY is on: check the
             // predicate, then do what the window path does.
@@ -1132,6 +1135,24 @@ public:
             std::memcmp(&ctx->r[29], &sp, sizeof(sp)) != 0 ||
             ctx->in_delay_slot != inDelaySlot || ctx->branch_pc != branchPc)
             throw std::runtime_error("Gate-3 checkpoint changed guest continuation");
+    }
+    // Run guest code for a rendering copy without advancing modeled time:
+    // Enter saves the EE cycle authority, the context's instruction count and
+    // the owner clock; Leave puts all three back. Not nestable; same thread.
+    struct Gate3OffClockV1 { uint64_t cycles = 0, insn = 0, now = 0; bool hasNow = false; R5900Context* previous = nullptr; };
+    Gate3OffClockV1 gate3EnterOffClockV1(R5900Context *ctx) noexcept
+    {
+        Gate3OffClockV1 s{m_gate3ModeledEeCyclesV1, ctx->insn_count, 0, m_gate3LazyV1.now != nullptr, m_gate3OffClockCtxV1};
+        if (s.hasNow) s.now = *m_gate3LazyV1.now;
+        m_gate3OffClockCtxV1 = ctx;
+        return s;
+    }
+    void gate3LeaveOffClockV1(R5900Context *ctx, const Gate3OffClockV1 &s) noexcept
+    {
+        m_gate3ModeledEeCyclesV1 = s.cycles;
+        ctx->insn_count = s.insn;
+        if (s.hasNow && m_gate3LazyV1.now) *m_gate3LazyV1.now = s.now;
+        m_gate3OffClockCtxV1 = s.previous;
     }
     void gate3BeginInstructionV1(R5900Context *ctx) noexcept
     {
@@ -1369,6 +1390,7 @@ private:
         uint64_t arms = 0;
         uint64_t miss[5] = {}; // RRV_GATE4_LAZY_STATS: unarmed, context, deadline, cop0, generation
     } m_gate3LazyV1;
+    R5900Context* m_gate3OffClockCtxV1 = nullptr;
     Gate3CheckpointV1 m_gate3CheckpointV1;
     rrv::guestoutcome::RuntimeTerminalOutcomeHandle m_rrvTerminalOutcome =
         rrv::guestoutcome::makeRuntimeTerminalOutcome();

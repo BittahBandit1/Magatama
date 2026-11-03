@@ -16,6 +16,7 @@
 #include "rrv_nocturne_aspect.h"
 #include "nocturne_render_pose_trace.h"
 #include "nocturne_pose_interpolation.h"
+#include "nocturne_skin_interpolation.h"
 #include "runtime/magatama_render_pose_hook.h"
 #include "rrv_nocturne_frame_trace.h"
 #include "rrv_gs_trace_hooks.h"
@@ -41,6 +42,8 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <array>
+#include <cstddef>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -241,6 +244,14 @@ void observeCameraPose(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
 void observeDrawStart(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
     auto r=poseRecord(ram,rt,'S');r.mode=GPR_U32(c,4);r.slot=GPR_U32(c,5);
     const uint32_t slot=poseAddress(GPR_U32(c,22),16);if(slot){r.root=slot;r.packet=poseWord(ram,slot);}
+    if(magatama::skin::interpolator().enabled()){
+        // The halfway skinned packets replace the endpoint only in the first
+        // draw of a 2-field frame; the second draw stays byte-for-byte original.
+        uint16_t next=0;std::memcpy(&next,ram+0x54e82c,2);
+        magatama::skin::interpolator().drawStart(r.mode==0&&r.slot<=1&&next==2&&
+            !magatama::original_frame::hostMenu.load(std::memory_order_acquire)&&
+            !magatama::original_frame::fastForward.load(std::memory_order_acquire));
+    }
     const uint32_t ret=GPR_U32(c,31);g_poseStart(ram,c,rt);if(c->pc!=ret)return;
     uint16_t cadence=0;std::memcpy(&cadence,ram+0x54e82c,2);r.flags=cadence;
     auto batch=std::move(g_pendingRenderPoses);g_pendingRenderPoses.clear();
@@ -256,6 +267,88 @@ void observeDrawStart(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
 }
 void observeModelFree(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
     auto r=poseRecord(ram,rt,'F');r.node=GPR_U32(c,4);publishRenderPose(r);g_poseFree(ram,c,rt);
+}
+// Experimental 60 FPS for EE-skinned models (see nocturne_skin_interpolation.h).
+// sdfCorePacketGen(node a0, packet a1, attr a2, color a3, soften f12, bias f13,
+// frame t0, reverse t1) returns the finished packet's DMA CNT header.
+PS2Runtime::RecompiledFunction g_skinGen;
+constexpr uint32_t kScreenTm=0x529710u, kPacketBuffPtr=0x551878u;
+inline uint32_t skinPhys(uint32_t a){return a&0x01ffffffu;}
+uint32_t skinPayload(const uint8_t* ram,uint32_t header,uint32_t& bytes){
+    bytes=0;if(!header)return 0;const uint32_t h=skinPhys(header);if(h>32u*1024*1024-16)return 0;
+    uint32_t tag;std::memcpy(&tag,ram+h,4);bytes=(tag&0xffffu)*16u;
+    if(bytes>32u*1024*1024-16-h){bytes=0;return 0;}return h+16;
+}
+void skinGenerate(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
+    auto& skin=magatama::skin::interpolator();
+    const uint32_t ra=GPR_U32(c,31),node=skinPhys(GPR_U32(c,4));const int32_t frame=int32_t(GPR_U32(c,8));
+    struct Slot{uint32_t at;std::array<uint8_t,128> mid;};
+    std::vector<Slot> slots;std::array<uint8_t,64> screenMid{};bool ready=false;
+    const uint32_t root=node?skinPhys(poseWord(ram,node+0x10)):0;
+    // MAGATAMA_SKIN_DEBUG=<first>-<end>: per-call fallback reasons in that field window.
+    static const std::pair<uint64_t,uint64_t> debugWindow=[]{unsigned long long a=0,b=0;const char* v=std::getenv("MAGATAMA_SKIN_DEBUG");
+        if(v&&std::sscanf(v,"%llu-%llu",&a,&b)==2&&b>a)return std::pair<uint64_t,uint64_t>{a,b};return std::pair<uint64_t,uint64_t>{0,0};}();
+    static unsigned debugLines=0;
+    auto debugOn=[&](PS2Runtime* r){const auto f=r->gate3TemporalV1().starts();return debugLines<20000&&f>=debugWindow.first&&f<debugWindow.second&&++debugLines;};
+
+    {
+        std::lock_guard<std::mutex> lock(skin.mutex());
+        skin.frame(frame);
+        const uint32_t list=root?skinPhys(poseWord(ram,root)):0;
+        if((frame==0||frame==1)&&list){
+            int16_t count=0;std::memcpy(&count,ram+list+4,2);
+            const uint32_t items=skinPhys(poseWord(ram,list+0xc));
+            ready=count>0&&count<=512&&items&&items<=32u*1024*1024-4u*uint32_t(count);
+            bool valid=ready; // address problems stop the walk; pose failures do not
+            for(int i=0;valid&&i<count;++i){
+                const uint32_t n=skinPhys(poseWord(ram,items+4*i));
+                const uint32_t tm=n?skinPhys(poseWord(ram,n+0x30)):0;
+                if(!tm)continue; // nodes without a transform packet are not drawn
+                const uint32_t at=tm+(uint32_t(frame)<<7);
+                if(at>32u*1024*1024-128){ready=valid=false;break;}
+                Slot slot{at,{}};
+                if(skin.nodeMid(n,ram+at,slot.mid.data()))slots.push_back(slot);else{ready=false;if(debugOn(rt)){++debugLines;std::fprintf(stderr,"[skin-debug] node-fail field=%llu root=%06x node=%06x i=%d/%d why=%d\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,n,i,count,skin.lastWhy);}}
+            }
+            const bool screenOk=ready&&!slots.empty()&&skin.screenMid(root,ram+kScreenTm,screenMid.data());
+            if(ready&&!screenOk&&debugOn(rt)){++debugLines;std::fprintf(stderr,"[skin-debug] screen-fail field=%llu root=%06x\n",(unsigned long long)rt->gate3TemporalV1().starts(),root);}
+            ready=screenOk;
+        }
+        if(!ready)skin.bad(root);
+        skin.prune();
+    }
+    if(!ready){g_skinGen(ram,c,rt);return;}
+    // Halfway pass: original code, original inputs except the matrices. It
+    // runs on the guest clock like any other EE work (time never rewinds);
+    // the borrowed registers and memory are put back afterwards.
+    const R5900Context before=*c;
+    uint32_t bufferPtr;std::memcpy(&bufferPtr,ram+kPacketBuffPtr,4);
+    std::vector<std::array<uint8_t,128>> saved(slots.size());std::array<uint8_t,64> screenSaved;
+    for(size_t i=0;i<slots.size();++i){std::memcpy(saved[i].data(),ram+slots[i].at,128);std::memcpy(ram+slots[i].at,slots[i].mid.data(),128);}
+    std::memcpy(screenSaved.data(),ram+kScreenTm,64);std::memcpy(ram+kScreenTm,screenMid.data(),64);
+    g_skinGen(ram,c,rt);
+    const bool midReturned=c->pc==ra;const uint32_t midHeader=GPR_U32(c,2);
+    uint32_t midEnd;std::memcpy(&midEnd,ram+kPacketBuffPtr,4);
+    uint32_t midBytes=0;const uint32_t midAt=midReturned?skinPayload(ram,midHeader,midBytes):0;
+    std::vector<uint8_t> mid;if(midAt)mid.assign(ram+midAt,ram+midAt+midBytes);
+    for(size_t i=0;i<slots.size();++i)std::memcpy(ram+slots[i].at,saved[i].data(),128);
+    std::memcpy(ram+kScreenTm,screenSaved.data(),64);
+    // Reclaim the halfway packet's space unless something else allocated since.
+    uint32_t nowPtr;std::memcpy(&nowPtr,ram+kPacketBuffPtr,4);
+    if(nowPtr==midEnd)std::memcpy(ram+kPacketBuffPtr,&bufferPtr,4);
+    // Registers as they were at the call, but keep time and interrupt state
+    // (instruction count, COP0) as they now are.
+    const R5900Context after=*c;
+    *c=before;c->insn_count=after.insn_count;
+    std::memcpy(reinterpret_cast<uint8_t*>(c)+offsetof(R5900Context,cop0_index),
+        reinterpret_cast<const uint8_t*>(&after)+offsetof(R5900Context,cop0_index),
+        offsetof(R5900Context,cop0_errorepc)+sizeof(after.cop0_errorepc)-offsetof(R5900Context,cop0_index));
+    // Endpoint pass: exactly the original call.
+    g_skinGen(ram,c,rt);
+    std::lock_guard<std::mutex> lock(skin.mutex());
+    uint32_t bytes=0;const uint32_t at=c->pc==ra?skinPayload(ram,GPR_U32(c,2),bytes):0;
+    if(!at){if(!midAt||!midBytes)return;skin.bad(root);return;} // both empty: nothing drawn
+    if(debugOn(rt))std::fprintf(stderr,"[skin-debug] packet field=%llu root=%06x node=%06x bytes=%u mid=%u\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,node,bytes,midBytes);
+    skin.record(root,at,ram+at,mid.data(),bytes,midBytes);
 }
 void armRenderPoseTrace(PS2Runtime& rt) {
     const char* p=std::getenv("MAGATAMA_RENDER_POSE_TRACE");
@@ -273,6 +366,15 @@ void armRenderPoseTrace(PS2Runtime& rt) {
         magatama::pose_trace::trace().unpack(a,cmd,dest,data,bytes);};
     if(enabled)g_magatamaRenderUnpackTransform=[](uint32_t a,uint32_t cmd,const uint8_t* data,uint32_t bytes,uint8_t* out){
         return magatama::pose::interpolator().unpack(a,cmd,data,bytes,out);};
+    // Characters: EE-skinned packets (MAGATAMA_INTERPOLATE_SKIN=0 disables).
+    const char* skinEnv=std::getenv("MAGATAMA_INTERPOLATE_SKIN");
+    if(enabled && !(skinEnv&&skinEnv[0]=='0')){
+        magatama::skin::interpolator().configure();
+        wrap(0x2b9178,g_skinGen,skinGenerate);
+        g_magatamaChainPatch=[](uint32_t source,std::vector<uint8_t>& stream,size_t offset,uint32_t bytes){
+            magatama::skin::interpolator().chain(source,stream,offset,bytes);};
+        std::fprintf(stderr,"[skin-interpolation] experimental60 EE-skinned models armed\n");
+    }
     std::fprintf(stderr,"[render-pose] correspondence trace=%d experimental60=%d; original simulation/audio clocks preserved\n",int(p&&*p),int(enabled));
 }
 }

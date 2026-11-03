@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <utility>
 #include <map>
 #include <mutex>
 #include <string>
@@ -25,6 +27,14 @@ class Trace {
     Record phase_{}; // VU owner only, ordered before that draw's DMA work
 public:
     static bool window(uint64_t field) {
+        // MAGATAMA_RENDER_POSE_WINDOW=<first>-<end> (end exclusive) replaces
+        // the three default diagnostic windows.
+        static const std::pair<uint64_t,uint64_t> custom=[]{
+            const char* v=std::getenv("MAGATAMA_RENDER_POSE_WINDOW");
+            unsigned long long a=0,b=0;
+            if(v&&std::sscanf(v,"%llu-%llu",&a,&b)==2&&b>a)return std::pair<uint64_t,uint64_t>{a,b};
+            return std::pair<uint64_t,uint64_t>{0,0};}();
+        if(custom.second)return field>=custom.first&&field<custom.second;
         return (field>=1200&&field<1240)||(field>=2100&&field<2140)||(field>=3300&&field<3340);
     }
     void open(const char* path) { if(path&&*path){path_=path;rows_.reserve(Cap);} }
@@ -43,7 +53,7 @@ public:
     void begin(Record r){phase_=r;add(r);}
     void unpack(uint32_t source,uint32_t command,uint32_t dest,const uint8_t* data,uint32_t bytes) {
         if(!enabled() || !window(phase_.field) || !data || bytes>208 ||
-            ((command&0x7fffffffu)!=0x6c07c000u && (command&0x7fffffffu)!=0x6c0bc000u))return;
+            ((command&0x7ffffc00u)!=0x6c07c000u && (command&0x7fffffffu)!=0x6c0bc000u))return;
         auto r=phase_;r.kind='U';r.packet=source;r.destination=dest;r.bytes=bytes;
         std::memcpy(r.data.data(),data,bytes);add(r);
     }

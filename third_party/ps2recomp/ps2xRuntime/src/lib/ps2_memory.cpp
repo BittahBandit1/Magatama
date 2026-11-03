@@ -55,6 +55,7 @@ void configure(Schedule schedule,std::function<void(unsigned)> interrupt) {
 #include "runtime/magatama_render_pose_hook.h"
 MagatamaRenderUnpackObserver g_magatamaRenderUnpackObserver = nullptr;
 MagatamaRenderUnpackTransform g_magatamaRenderUnpackTransform = nullptr;
+MagatamaChainPatch g_magatamaChainPatch = nullptr;
 std::function<bool(uint8_t*, uint32_t)> g_magatamaVif1Readback;
 static uint32_t magatamaReadIORegisterTraced(uint32_t address, uint32_t value);
 namespace {
@@ -2048,6 +2049,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             base2 = m_rdram;
                             maxSz2 = PS2_RAM_SIZE;
                         }
+                        const size_t patchAt = chainBuf.size();
+                        const uint32_t patchSource = src, patchBytes = bytes;
                         while (bytes > 0)
                         {
                             if (src >= maxSz2)
@@ -2061,6 +2064,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             bytes -= chunk;
                             src += chunk;
                         }
+                        if (g_magatamaChainPatch && !scratch && channelBase == 0x10009000 &&
+                            chainBuf.size() - patchAt == patchBytes)
+                            g_magatamaChainPatch(patchSource, chainBuf, patchAt, patchBytes);
                     };
 
                     auto appendDmaTagUpper = [&](uint32_t localTagAddr)

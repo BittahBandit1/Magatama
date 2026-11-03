@@ -110,16 +110,24 @@ class PacketFilter {
             (fontTest==0x517edu || fontTest==0x5380bu) &&
             ((c.tex>>20)&63)==20 && paths[path].flag==1 &&
             paths[path].nr==3 && paths[path].regs==0x413;
+        // The field main menu (Square) layers its panels and glyphs with real
+        // depth: TEST 0x5101B (alpha GEQUAL ref 1, FB_ONLY, Z GEQUAL) at Z=0
+        // and mid-range Z. Its highlight bar is an untextured FST strip at
+        // TEST 0x30000/0x7101B. World lighting strips never set FST, and no
+        // recorded field/battle trace draws direct mid-Z FST sprites otherwise.
+        const bool menuSprite=tme && fst && (effective&7)==6 && fontTest==0x5101bu;
+        const bool menuBar=!tme && (effective&256) && (effective&7)==4 &&
+            (fontTest==0x30000u || fontTest==0x7101bu) && z>0 && z<=0xff0000u;
         // Main 3D projection is bounded by FF0000 (locked USA screen record).
         // Recorded direct UI uses UV/FST at Z=0 as well as far-depth overlays.
-        if(!(z>0xff0000u || font || (overlay && (!tme || fst)))) return;
+        if(!(z>0xff0000u || font || menuSprite || menuBar || (overlay && (!tme || fst)))) return;
         if(tme && ((c.tex>>26)&15)>=9 && isFeedback(uint32_t(c.tex&16383))) return;
         // Native world lighting uses tiled, untextured strips at 0x0FFFFF
         // (e.g. PRIM=0x4D, TEST=0x33801). Each tile has its own GIF tag, so
         // per-tag full-screen bounds cannot recognize the complete effect.
         // Keep the world-depth range native, including partial submissions;
         // direct HUD uses Z=0 or the reserved far overlay range instead.
-        if (!tme && z > 0 && z <= 0xff0000u) return;
+        if (!tme && z > 0 && z <= 0xff0000u && !menuBar) return;
         // Z-writing opaque untextured primitives are framebuffer clears.
         if(!tme && !(effective&64) && !(c.zbuf&(1ull<<32))) return;
         uint16_t x,y; std::memcpy(&x,p,2); std::memcpy(&y,p+(packed?4:2),2);

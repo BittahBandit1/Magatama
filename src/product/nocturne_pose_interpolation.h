@@ -5,6 +5,9 @@
 #include <map>
 #include <tuple>
 #include <cstdio>
+#include <cstdlib>
+#include <array>
+#include <cstring>
 
 namespace magatama::pose {
 // Owner-only render history. Pose generations come from completed original
@@ -18,7 +21,12 @@ class Interpolator {
  uint64_t previousField_=0;
  bool configured_=false,pending_=false,pair_=false,cameraSafe_=false;
  uint64_t phases_=0,model_=0,camera_=0,changed_=0,mismatch_=0,rejected_=0,complete_=0;
- Key key(const Record& r) const{return {r.kind,r.node,r.root,r.shape,r.slot,r.mode,r.flags};}
+ // Per-phase diagnostics: seen, unknown-packet, mismatch, no-history, camera-unsafe, rejected, interpolated, endpoint.
+ std::array<uint32_t,8> why_{};
+ void summarize(){if(why_[0]){auto r=phase_;r.kind='R';r.bytes=32;std::memcpy(r.data.data(),why_.data(),32);pose_trace::trace().add(r);}why_={};}
+ // Camera history ignores the battle director state (mode/flags); a state
+ // change is checked against camera motion instead (see unpack).
+ Key key(const Record& r) const{return r.kind=='C'?Key{r.kind,r.node,r.root,r.shape,r.slot,0u,0u}:Key{r.kind,r.node,r.root,r.shape,r.slot,r.mode,r.flags};}
  void invalidate(){previous_.clear();current_.clear();pending_=pair_=cameraSafe_=false;}
 public:
  void configure(){configured_=true;}
@@ -37,7 +45,7 @@ public:
   packets_[r.packet]=r;
  }
  void begin(const Record& r){
-  phase_=r;cameraSafe_=false;++phases_;
+  summarize();phase_=r;cameraSafe_=false;++phases_;
   if(r.flags!=2||r.mode>1||r.slot>1||!r.packet){invalidate();return;}
   if(r.mode==0){
    if(pending_)previous_.clear();
@@ -59,21 +67,34 @@ public:
   if(!configured_||!pending_||original_frame::hostMenu.load(std::memory_order_acquire)||original_frame::fastForward.load(std::memory_order_acquire))return false;
   // Each viewport packet must establish its own continuity. A later unknown,
   // changed or stale view must not leave models authorized by an earlier view.
+  command&=0x7fffffffu;
   if(command==0x6c0bc000u)cameraSafe_=false;
-  if((command!=0x6c07c000u||bytes!=112)&&(command!=0x6c0bc000u||bytes!=176))return false;
-  auto it=packets_.find(source);if(it==packets_.end())return false;auto now=it->second;
+  // Model TMs: UNPACK V4-32 x7 with USN|FLG at any VU address. One-skin
+  // models (sdfModelSetOneSkinDrawPacket) send each bone to VU address 1,8,15...
+  const bool modelTm=(command&~0x3ffu)==0x6c07c000u&&bytes==112;
+  if(!modelTm&&(command!=0x6c0bc000u||bytes!=176))return false;
+  ++why_[0];auto it=packets_.find(source);if(it==packets_.end()){++why_[1];return false;}auto now=it->second;
   if(now.kind=='C')cameraSafe_=false;
   // Packet identity and VIF layout must agree before math reads either payload.
   if((now.kind=='C' && bytes!=176)||(now.kind=='P' && bytes!=112))return false;
-  if(phase_.field<now.field||phase_.field-now.field>4||std::memcmp(data,now.data.data(),bytes)!=0){++mismatch_;return false;}
+  if(phase_.field<now.field||phase_.field-now.field>4||std::memcmp(data,now.data.data(),bytes)!=0){++mismatch_;++why_[2];return false;}
   now.field=phase_.field;std::memcpy(now.data.data(),data,bytes);
   const auto id=key(now);
-  if(phase_.mode==1){current_[id]=now;return false;} // authoritative endpoint, byte-for-byte original
-  auto old=previous_.find(id);if(old==previous_.end())return false;
-  if(now.kind=='P'&&!cameraSafe_)return false;
+  if(phase_.mode==1){current_[id]=now;++why_[7];return false;} // authoritative endpoint, byte-for-byte original
+  auto old=previous_.find(id);if(old==previous_.end()){++why_[3];return false;}
+  if(now.kind=='P'&&!cameraSafe_){++why_[4];return false;}
+  // A director state change with a still or nearly still camera is not a cut:
+  // blend only when the eye moved <=20 units and the view turned <=10 degrees.
+  if(now.kind=='C'&&(old->second.mode!=now.mode||old->second.flags!=now.flags)&&
+     !cameraNear(old->second.data.data(),data,20.f,0.9961947f)){++why_[5];++rejected_;return false;}
   const bool valid=now.kind=='C'?cameraPacket(old->second.data.data(),data,.5f,out):modelPacket(old->second.data.data(),data,.5f,out);
   if(now.kind=='C')cameraSafe_=valid;
-  if(!valid){++rejected_;return false;}
+  if(!valid){++rejected_;++why_[5];return false;}
+  ++why_[6];
+  // Diagnostic only: MAGATAMA_INTERPOLATE_PROBE=1 shifts interpolated models
+  // far sideways so a capture shows whether these bytes reach the renderer.
+  static const bool probe=[]{const char* v=std::getenv("MAGATAMA_INTERPOLATE_PROBE");return v&&v[0]=='1';}();
+  if(probe&&now.kind=='P'){float tx;std::memcpy(&tx,out+48,4);tx+=200.f;std::memcpy(out+48,&tx,4);}
   if(bytes==112)++model_;else ++camera_;if(std::memcmp(data,out,bytes)!=0)++changed_;
   auto trace=now;trace.kind='I';trace.mode=0;trace.request=phase_.request;trace.bytes=bytes;std::memcpy(trace.data.data(),out,bytes);pose_trace::trace().add(trace);
   return true;

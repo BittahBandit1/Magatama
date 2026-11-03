@@ -11,6 +11,8 @@ int main(){pose::Interpolator e;e.configure();endpoint(e,10,0);auto c=packet('C'
  original_frame::hostMenu=true;CHECK(!e.unpack(p.packet,0x6c07c000,p.data.data(),112,out));original_frame::hostMenu=false;
  original_frame::fastForward=true;CHECK(!e.unpack(p.packet,0x6c07c000,p.data.data(),112,out));original_frame::fastForward=false;
  auto corrupt=p.data;corrupt[0]^=1;CHECK(!e.unpack(p.packet,0x6c07c000,corrupt.data(),112,out));CHECK(!e.unpack(p.packet,0x6c06c000,p.data.data(),112,out));
+ // One-skin bones carry their VU address in the UNPACK command and still blend.
+ endpoint(e,14,0);c=packet('C',16,10);p=packet('P',16,10);e.publish(c);e.publish(p);e.begin(start(16,0));CHECK(e.unpack(c.packet,0x6c0bc000,c.data.data(),176,out));CHECK(e.unpack(p.packet,0x6c07c008,p.data.data(),112,out));
  // A camera teleport disables model interpolation for that draw.
  endpoint(e,20,0);c=packet('C',22,1000);p=packet('P',22,10);e.publish(c);e.publish(p);e.begin(start(22,0));CHECK(!e.unpack(c.packet,0x6c0bc000,c.data.data(),176,out));CHECK(!e.unpack(p.packet,0x6c07c000,p.data.data(),112,out));
  // Object identity changes and frees cannot reuse previous pose history.
@@ -18,7 +20,10 @@ int main(){pose::Interpolator e;e.configure();endpoint(e,10,0);auto c=packet('C'
  endpoint(e,40,0);R freed;freed.kind='F';freed.node=0x3000;e.publish(freed);c=packet('C',42,10);p=packet('P',42,10);e.publish(c);e.publish(p);e.begin(start(42,0));CHECK(e.unpack(c.packet,0x6c0bc000,c.data.data(),176,out));CHECK(!e.unpack(p.packet,0x6c07c000,p.data.data(),112,out));
  // Camera scene/object or director state changes also break continuity.
  endpoint(e,50,0);c=packet('C',52,10);c.shape++;e.publish(c);e.begin(start(52,0));CHECK(!e.unpack(c.packet,0x6c0bc000,c.data.data(),176,out));
- endpoint(e,60,0);c=packet('C',62,10);c.mode++;e.publish(c);e.begin(start(62,0));CHECK(!e.unpack(c.packet,0x6c0bc000,c.data.data(),176,out));
+ // A director state change is a cut only when the camera itself jumps;
+ // a still or slowly moving camera keeps blending (no dropped field).
+ endpoint(e,60,0);c=packet('C',62,10);c.mode++;e.publish(c);e.begin(start(62,0));CHECK(e.unpack(c.packet,0x6c0bc000,c.data.data(),176,out));
+ endpoint(e,70,0);c=packet('C',72,60);c.flags++;e.publish(c);e.begin(start(72,0));CHECK(!e.unpack(c.packet,0x6c0bc000,c.data.data(),176,out));
  // A second unsupported/stale camera in the same phase revokes model continuity.
  // Multi-view draws must not inherit permission from an earlier recognized camera.
  for(unsigned failure=0;failure<3;++failure){

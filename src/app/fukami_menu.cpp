@@ -609,6 +609,8 @@ void Menu::change(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, cons
 
 bool Menu::applyLive(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, const std::string &value)
 {
+    std::fprintf(stderr, "[fukami-menu] applying %.*s.%.*s=%s\n", int(spec.section.size()), spec.section.data(),
+                 int(spec.key.size()), spec.key.data(), value.c_str());
     if (spec.section == "audio" && spec.key == "volume")
         rrv::audio::setOutputVolume(static_cast<int>(toLong(value, 100)));
     else if (spec.section == "audio" && spec.key == "mute")

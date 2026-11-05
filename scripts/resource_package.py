@@ -19,7 +19,7 @@ def fixed(build: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path
     return root, root / ".rrv-resource-package.lock", root / "CMakeFiles/rrv-resource-package/spec.json", root / ".rrv-resource-packages"
 
 def native() -> None:
-    if sys.platform.startswith("linux") and platform.machine() == "x86_64": return  # Gate 5 (Linux/Steam Deck)
+    if sys.platform.startswith("linux") and platform.machine() in ("x86_64", "aarch64"): return  # Gate 5 (Linux/Steam Deck); Magatama: Linux ARM64
     if sys.platform == "win32" and platform.machine().lower() in ("amd64", "x86_64"): return  # Windows x86-64
     if sys.platform != "darwin" or platform.machine() != "arm64": raise PackageError("ADR-0006 requires native macOS arm64, Linux x86-64 or Windows x86-64")
 

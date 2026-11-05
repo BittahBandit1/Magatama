@@ -5,6 +5,8 @@
 #
 # It watches ~/magatama/jobs for a file named next.job. A job may only say three things:
 #   build=1                 rebuild first (scripts/magatama_build.sh)
+#   ios=1                   build the iOS app only (scripts/magatama_build_ios.sh, log build-ios.log);
+#                           nothing is run on this Mac and no other line may accompany it except build=1
 #   seconds=<5..900>        how long to let the game run before closing it (SIGTERM = a normal quit)
 #   sample=<5..110>         also profile the game with macOS `sample` for 8 s starting this many seconds in
 #                           (written to ~/magatama/logs/sample-<id>.txt)
@@ -38,10 +40,11 @@ while true; do
     id="$(date +%Y%m%d-%H%M%S)"
     mv "$jobs/next.job" "$jobs/$id.job"
     done_file="$jobs/$id.done"
-    build=0; seconds=15; sample_at=0; envs=(); bad=""; card_source=""; job_card=""
+    build=0; ios=0; seconds=15; sample_at=0; envs=(); bad=""; card_source=""; job_card=""
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         if [[ "$line" == build=1 ]]; then build=1
+        elif [[ "$line" == ios=1 ]]; then ios=1
         elif [[ "$line" =~ '^seconds=([0-9]+)$' ]] && (( match[1] >= 5 && match[1] <= 900 )); then seconds=$match[1]
         elif [[ "$line" =~ '^replay=([A-Za-z0-9._-]+)$' && -f "$HOME/magatama/replays/$match[1].workload" ]]; then
             envs+=("RRV_GATE3_BOUND_WORKLOAD=$HOME/magatama/replays/$match[1].workload" "RRV_GATE3_LIVE_PAD=0")
@@ -66,6 +69,15 @@ while true; do
             print "status=card-copy-failed" > "$done_file"; continue
         fi
         envs+=("RRV_GATE3_MC_ROOT=$job_card")
+    fi
+    if (( ios )); then
+        print "[$id] job: iOS build"
+        if "$repo/scripts/magatama_build_ios.sh" > "$repo/build-ios.log" 2>&1; then
+            print "status=ios-built\nlog=$repo/build-ios.log" > "$done_file"; print "[$id] iOS build ok"
+        else
+            print "status=ios-build-failed\nlog=$repo/build-ios.log" > "$done_file"; print "[$id] iOS build failed"
+        fi
+        continue
     fi
     print "[$id] job: build=$build seconds=$seconds env=${envs[*]:-none}"
     if (( build )); then

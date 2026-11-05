@@ -37,6 +37,7 @@ extern "C" __attribute__((weak)) void rrv_free_camera_stick(float x, float y);
 
 #include <SDL.h>
 #if defined(__APPLE__)
+#include <TargetConditionals.h>
 #include <SDL_metal.h>
 #include <time.h>
 #endif
@@ -963,6 +964,8 @@ public:
         bool left = false, right = false, up = false, down = false;
     };
     std::array<StickHold, 2> sticks{};
+    bool threeFingerMenu = false; // iOS/Android: one menu toggle per three-finger touch
+    std::vector<SDL_FingerID> touchFingers; // fingers down now, counted from the events themselves
     StickHold *stickFor(SDL_JoystickID id);
     void releaseSticks(StickHold &hold);
     bool lastFullscreen = false;
@@ -1100,7 +1103,7 @@ void *appKitWindow(SDL_Window *window)
 {
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
-#if defined(__APPLE__)
+#if defined(__APPLE__) && defined(SDL_VIDEO_DRIVER_COCOA)
     if (!window || SDL_GetWindowWMInfo(window, &info) != SDL_TRUE || info.subsystem != SDL_SYSWM_COCOA)
         return nullptr;
     return static_cast<void *>(info.info.cocoa.window);
@@ -1273,8 +1276,15 @@ int findBridgeOverlay(void **image, void **symbol)
         Dl_info info{};
         char expected[PATH_MAX] = {};
         char observed[PATH_MAX] = {};
+#if defined(__ANDROID__)
+        // APK libraries load from inside the APK ("base.apk!/lib/..."), which realpath cannot resolve: compare names.
+        (void)expected;
+        (void)observed;
+        if (!entry || dladdr(entry, &info) == 0 || !info.dli_fname || std::strcmp(name, info.dli_fname) != 0)
+#else
         if (!entry || dladdr(entry, &info) == 0 || !info.dli_fname || !realpath(name, expected) ||
             !realpath(info.dli_fname, observed) || std::strcmp(expected, observed) != 0)
+#endif
         {
             dlclose(handle);
             return -1;
@@ -1530,6 +1540,27 @@ void SdlPresentation::Impl::routeMenuEvent(const SDL_Event &event)
     }
     switch (event.type)
     {
+#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(__ANDROID__)
+    // iOS/Android: a three-finger tap is the Escape key (opens or closes the menu). One toggle per touch: it fires
+    // when the third finger lands and re-arms when every finger is lifted. Fingers are counted from the events (by
+    // the time an event is handled, a quick tap may already be over). Single touches reach the menu as SDL's mouse
+    // events.
+    case SDL_FINGERDOWN:
+        if (std::find(touchFingers.begin(), touchFingers.end(), event.tfinger.fingerId) == touchFingers.end())
+            touchFingers.push_back(event.tfinger.fingerId);
+        if (!threeFingerMenu && touchFingers.size() >= 3)
+        {
+            threeFingerMenu = true;
+            toggleMenu();
+        }
+        return;
+    case SDL_FINGERUP:
+        touchFingers.erase(std::remove(touchFingers.begin(), touchFingers.end(), event.tfinger.fingerId),
+                           touchFingers.end());
+        if (touchFingers.empty())
+            threeFingerMenu = false;
+        return;
+#endif
     case SDL_KEYDOWN:
     case SDL_KEYUP:
     {
@@ -1537,6 +1568,21 @@ void SdlPresentation::Impl::routeMenuEvent(const SDL_Event &event)
         const bool down = event.type == SDL_KEYDOWN;
         if (event.key.repeat != 0)
             return;
+#if defined(__ANDROID__)
+        // Android's Back button (SDL_HINT_ANDROID_TRAP_BACK_BUTTON) is Escape: it opens and closes the menu.
+        if (down && scancode == SDL_SCANCODE_AC_BACK)
+        {
+            if (menu->isOpen())
+            {
+                // As Escape inside the menu: back out of a list or close the menu.
+                menu->post(menuKey(RRV_PCSX2_GS_UI_KEY_ESCAPE, true));
+                menu->post(menuKey(RRV_PCSX2_GS_UI_KEY_ESCAPE, false));
+            }
+            else
+                toggleMenu();
+            return;
+        }
+#endif
         if (down && (scancode == SDL_SCANCODE_F1 || (scancode == SDL_SCANCODE_ESCAPE && !menu->isOpen())))
         {
             toggleMenu();
@@ -1694,7 +1740,7 @@ bool SdlPresentation::create(const char *title, std::string *error)
     // Full screen is a macOS full-screen Space (SDL's default, stated here
     // because the green button and Cmd+Ctrl+F rely on it; see setWindowFullscreen).
     SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "1");
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
     // Gate 5: X11 first (Steam Deck Game Mode's gamescope runs SDL on
     // XWayland), Wayland second. An explicit SDL_VIDEODRIVER still wins.
     if (const char *driver = std::getenv("SDL_VIDEODRIVER"); !driver || driver[0] == '\0')
@@ -1786,6 +1832,14 @@ bool SdlPresentation::create(const char *title, std::string *error)
             impl->nativeLayer = static_cast<void *>(info.info.wl.surface);
             break;
 #endif
+#if defined(__ANDROID__)
+        case SDL_SYSWM_ANDROID:
+            // The ANativeWindow is both handles; SDL keeps it until the surface goes away (app in background).
+            impl->surfaceKind = rrv::gsbackend::NativeSurfaceKind::Android;
+            impl->nativeView = static_cast<void *>(info.info.android.window);
+            impl->nativeLayer = static_cast<void *>(info.info.android.window);
+            break;
+#endif
 #if defined(_WIN32)
         case SDL_SYSWM_WINDOWS:
             impl->surfaceKind = rrv::gsbackend::NativeSurfaceKind::Win32;
@@ -1809,6 +1863,7 @@ bool SdlPresentation::create(const char *title, std::string *error)
         }
         std::fprintf(stderr, "[sdl] video driver %s, %s surface\n", SDL_GetCurrentVideoDriver(),
                      impl->surfaceKind == rrv::gsbackend::NativeSurfaceKind::Win32     ? "Win32"
+                     : impl->surfaceKind == rrv::gsbackend::NativeSurfaceKind::Android  ? "Android"
                      : impl->surfaceKind == rrv::gsbackend::NativeSurfaceKind::LinuxX11 ? "X11"
                                                                                          : "Wayland");
     }

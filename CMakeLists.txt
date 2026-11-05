@@ -158,10 +158,10 @@ if(RRV_BUILD_LEGACY_LIVE)
 endif()
 
 if(RRV_BUILD_PRODUCT)
-    if(NOT APPLE AND NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+    if(NOT APPLE AND NOT ANDROID AND NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|aarch64|arm64)$")
        AND NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$" AND RRV_CLANG_CL))
         message(FATAL_ERROR
-            "rrv-product is a macOS Metal, Linux x86-64 Vulkan or Windows x86-64 (clang-cl) Vulkan direct-present target; "
+            "rrv-product is a macOS Metal, Linux x86-64/ARM64 Vulkan or Windows x86-64 (clang-cl) Vulkan direct-present target; "
             "refusing a fallback presentation path")
     endif()
     include("${CMAKE_SOURCE_DIR}/cmake/RrvProduct.cmake")

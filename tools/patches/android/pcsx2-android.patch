@@ -1,0 +1,518 @@
+diff --git a/3rdparty/rrv-ios-pcap/CMakeLists.txt b/3rdparty/rrv-ios-pcap/CMakeLists.txt
+new file mode 100644
+index 000000000..f576ad880
+--- /dev/null
++++ b/3rdparty/rrv-ios-pcap/CMakeLists.txt
+@@ -0,0 +1,4 @@
++# RRV iOS bridge: libpcap stand-in. The iOS SDK has no libpcap; every call fails, so DEV9 lists no adapters.
++add_library(rrv_ios_pcap STATIC pcap_stub.c)
++target_include_directories(rrv_ios_pcap PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
++add_library(PCAP::PCAP ALIAS rrv_ios_pcap)
+diff --git a/3rdparty/rrv-ios-pcap/include/pcap.h b/3rdparty/rrv-ios-pcap/include/pcap.h
+new file mode 100644
+index 000000000..09127a84a
+--- /dev/null
++++ b/3rdparty/rrv-ios-pcap/include/pcap.h
+@@ -0,0 +1,36 @@
++/* RRV iOS bridge: minimal libpcap interface; every call fails (pcap_stub.c). */
++#pragma once
++#include <stdint.h>
++#include <sys/time.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++#define PCAP_ERRBUF_SIZE 256
++#define PCAP_NETMASK_UNKNOWN 0xffffffffu
++#define DLT_EN10MB 1
++#define DLT_IEEE802_11 105
++typedef struct pcap pcap_t;
++typedef struct pcap_dumper pcap_dumper_t;
++struct pcap_pkthdr { struct timeval ts; uint32_t caplen; uint32_t len; };
++struct bpf_insn { unsigned short code; unsigned char jt, jf; uint32_t k; };
++struct bpf_program { unsigned int bf_len; struct bpf_insn* bf_insns; };
++typedef struct pcap_addr pcap_addr_t;
++struct pcap_addr { struct pcap_addr* next; struct sockaddr* addr; struct sockaddr* netmask; struct sockaddr* broadaddr; struct sockaddr* dstaddr; };
++typedef struct pcap_if pcap_if_t;
++struct pcap_if { struct pcap_if* next; char* name; char* description; struct pcap_addr* addresses; uint32_t flags; };
++pcap_t* pcap_open_live(const char*, int, int, int, char*);
++void pcap_close(pcap_t*);
++int pcap_compile(pcap_t*, struct bpf_program*, const char*, int, uint32_t);
++void pcap_freecode(struct bpf_program*);
++int pcap_setfilter(pcap_t*, struct bpf_program*);
++int pcap_setnonblock(pcap_t*, int, char*);
++int pcap_datalink(pcap_t*);
++const char* pcap_datalink_val_to_name(int);
++char* pcap_geterr(pcap_t*);
++int pcap_next_ex(pcap_t*, struct pcap_pkthdr**, const unsigned char**);
++int pcap_sendpacket(pcap_t*, const unsigned char*, int);
++int pcap_findalldevs(pcap_if_t**, char*);
++void pcap_freealldevs(pcap_if_t*);
++#ifdef __cplusplus
++}
++#endif
+diff --git a/3rdparty/rrv-ios-pcap/pcap_stub.c b/3rdparty/rrv-ios-pcap/pcap_stub.c
+new file mode 100644
+index 000000000..0d670c999
+--- /dev/null
++++ b/3rdparty/rrv-ios-pcap/pcap_stub.c
+@@ -0,0 +1,18 @@
++/* RRV iOS bridge: libpcap stand-in. No capture devices exist; every call fails. */
++#include <pcap.h>
++#include <string.h>
++static char s_error[] = "packet capture is not available on iOS";
++static void fill(char* errbuf) { if (errbuf) { strncpy(errbuf, s_error, PCAP_ERRBUF_SIZE - 1); errbuf[PCAP_ERRBUF_SIZE - 1] = 0; } }
++pcap_t* pcap_open_live(const char* d, int s, int p, int t, char* e) { (void)d; (void)s; (void)p; (void)t; fill(e); return 0; }
++void pcap_close(pcap_t* p) { (void)p; }
++int pcap_compile(pcap_t* p, struct bpf_program* b, const char* s, int o, uint32_t m) { (void)p; (void)b; (void)s; (void)o; (void)m; return -1; }
++void pcap_freecode(struct bpf_program* b) { (void)b; }
++int pcap_setfilter(pcap_t* p, struct bpf_program* b) { (void)p; (void)b; return -1; }
++int pcap_setnonblock(pcap_t* p, int n, char* e) { (void)p; (void)n; fill(e); return -1; }
++int pcap_datalink(pcap_t* p) { (void)p; return -1; }
++const char* pcap_datalink_val_to_name(int v) { (void)v; return 0; }
++char* pcap_geterr(pcap_t* p) { (void)p; return s_error; }
++int pcap_next_ex(pcap_t* p, struct pcap_pkthdr** h, const unsigned char** d) { (void)p; (void)h; (void)d; return -1; }
++int pcap_sendpacket(pcap_t* p, const unsigned char* d, int n) { (void)p; (void)d; (void)n; return -1; }
++int pcap_findalldevs(pcap_if_t** a, char* e) { if (a) *a = 0; fill(e); return -1; }
++void pcap_freealldevs(pcap_if_t* a) { (void)a; }
+diff --git a/cmake/BuildParameters.cmake b/cmake/BuildParameters.cmake
+index 80c44694b..71dc7b23f 100644
+--- a/cmake/BuildParameters.cmake
++++ b/cmake/BuildParameters.cmake
+@@ -78,8 +78,8 @@ mark_as_advanced(CMAKE_C_FLAGS_DEVEL CMAKE_CXX_FLAGS_DEVEL CMAKE_LINKER_FLAGS_DE
+ #-------------------------------------------------------------------------------
+ # Select the architecture
+ #-------------------------------------------------------------------------------
+-if("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "amd64" OR
+-   "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "AMD64" OR "${CMAKE_OSX_ARCHITECTURES}" STREQUAL "x86_64")
++if(NOT ANDROID AND ("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "amd64" OR
++   "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "AMD64" OR "${CMAKE_OSX_ARCHITECTURES}" STREQUAL "x86_64"))
+ 	# Multi-ISA only exists on x86.
+ 	option(DISABLE_ADVANCE_SIMD "Disable advance use of SIMD (SSE2+ & AVX)" OFF)
+ 
+@@ -110,7 +110,8 @@ if("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR "${CMAKE_HOST_SYSTEM_PR
+ 			endif()
+ 		endif()
+ 	endif()
+-elseif("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "aarch64" OR
++elseif((ANDROID AND "${CMAKE_ANDROID_ARCH_ABI}" STREQUAL "arm64-v8a") OR
++       "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "aarch64" OR
+        "${CMAKE_OSX_ARCHITECTURES}" STREQUAL "arm64")
+ 	message(STATUS "Building for Apple Silicon (ARM64).")
+ 	set(ARCH_ARM64 TRUE)
+@@ -124,7 +125,14 @@ elseif("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_HOST_SYSTEM
+ 
+ 	# If we're running on Linux, we need to detect the page/cache line size.
+ 	# It could be a virtual machine with 4K pages, or 16K with Asahi.
+-	if(LINUX)
++	# RRV Android: cross-built, so nothing to detect. PCSX2 requires the compile-time page size to equal the device's
++	# (VMManager), and Android devices use 4 KB pages (as ARMSX2 builds); the libraries themselves are still linked with
++	# 16 KB segment alignment (NDK r28 default) so they load on 16 KB kernels.
++	if(ANDROID)
++		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=0x1000)
++		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=64)
++	endif()
++	if(LINUX AND NOT ANDROID)
+ 		detect_page_size()
+ 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=${HOST_PAGE_SIZE})
+ 		detect_cache_line_size()
+diff --git a/cmake/Pcsx2Utils.cmake b/cmake/Pcsx2Utils.cmake
+index 42135790e..a4a53f024 100644
+--- a/cmake/Pcsx2Utils.cmake
++++ b/cmake/Pcsx2Utils.cmake
+@@ -9,6 +9,12 @@ function(detect_operating_system)
+ 		set(LINUX TRUE)
+ 	endif()
+ 
++	# RRV Android: bionic is close enough to glibc Linux for PCSX2's Linux paths; what differs is guarded with ANDROID.
++	if(ANDROID)
++		set(LINUX TRUE PARENT_SCOPE)
++		set(LINUX TRUE)
++	endif()
++
+ 	if(WIN32)
+ 		message(STATUS "Building for Windows.")
+ 	elseif(APPLE AND NOT IOS)
+diff --git a/cmake/SearchForStuff.cmake b/cmake/SearchForStuff.cmake
+index f3b71b7dd..2567d0ab2 100644
+--- a/cmake/SearchForStuff.cmake
++++ b/cmake/SearchForStuff.cmake
+@@ -39,7 +39,12 @@ if (WIN32)
+ 	find_package(Vtune)
+ else()
+ 	find_package(CURL REQUIRED)
+-	find_package(PCAP REQUIRED)
++	if(ANDROID)
++		# RRV Android bridge: no libpcap. DEV9 network adapters report none (the iOS port's stub, 3rdparty/rrv-ios-pcap).
++		add_subdirectory(3rdparty/rrv-ios-pcap EXCLUDE_FROM_ALL)
++	else()
++		find_package(PCAP REQUIRED)
++	endif()
+ 	find_package(Vtune)
+ 
+ 	# Use bundled ffmpeg v4.x.x headers if we can't locate it in the system.
+@@ -53,7 +58,7 @@ else()
+ 	## Use CheckLib package to find module
+ 	include(CheckLib)
+ 
+-	if(UNIX AND NOT APPLE)
++	if(UNIX AND NOT APPLE AND NOT ANDROID)
+ 		find_package(Fontconfig REQUIRED)
+ 		if(LINUX)
+ 			check_lib(LIBUDEV libudev libudev.h)
+diff --git a/common/CMakeLists.txt b/common/CMakeLists.txt
+index d1bad4494..43588a470 100644
+--- a/common/CMakeLists.txt
++++ b/common/CMakeLists.txt
+@@ -166,12 +166,16 @@ else()
+ 	target_include_directories(common PRIVATE
+ 		${DBUS_INCLUDE_DIRS}
+ 	)
++	if(ANDROID)
++		target_link_libraries(common PRIVATE android log)
++	else()
+ 	target_link_libraries(common PRIVATE
+ 		${DBUS_LINK_LIBRARIES}
+ 		X11::X11
+ 		X11::Xrandr
+ 		X11::Xi
+ 	)
++	endif()
+ 	if(USE_BACKTRACE)
+ 		target_compile_definitions(common PRIVATE "HAS_LIBBACKTRACE=1")
+ 		target_link_libraries(common PRIVATE libbacktrace::libbacktrace)
+diff --git a/common/Linux/LnxHostSys.cpp b/common/Linux/LnxHostSys.cpp
+index 523e6eaaa..859585432 100644
+--- a/common/Linux/LnxHostSys.cpp
++++ b/common/Linux/LnxHostSys.cpp
+@@ -14,6 +14,9 @@
+ #include <fcntl.h>
+ #include <mutex>
+ #include <sys/mman.h>
++#ifdef __ANDROID__
++#include <sys/syscall.h>
++#endif
+ #include <unistd.h>
+ #ifndef __APPLE__
+ #include <ucontext.h>
+@@ -63,6 +66,15 @@ std::string HostSys::GetFileMappingName(const char* prefix)
+ 
+ void* HostSys::CreateSharedMemory(const char* name, size_t size)
+ {
++#ifdef __ANDROID__
++	// RRV Android: bionic has no shm_open; an anonymous memfd is the same thing for a single-process mapping.
++	const int fd = static_cast<int>(syscall(__NR_memfd_create, name, 0));
++	if (fd < 0)
++	{
++		std::fprintf(stderr, "memfd_create failed: %d\n", errno);
++		return nullptr;
++	}
++#else
+ 	const int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+ 	if (fd < 0)
+ 	{
+@@ -72,6 +84,7 @@ void* HostSys::CreateSharedMemory(const char* name, size_t size)
+ 
+ 	// we're not going to be opening this mapping in other processes, so remove the file
+ 	shm_unlink(name);
++#endif
+ 
+ 	// ensure it's the correct size
+ 	if (ftruncate(fd, static_cast<off_t>(size)) < 0)
+diff --git a/common/Linux/LnxMisc.cpp b/common/Linux/LnxMisc.cpp
+index 84901fe23..63af2aa24 100644
+--- a/common/Linux/LnxMisc.cpp
++++ b/common/Linux/LnxMisc.cpp
+@@ -13,14 +13,18 @@
+ 
+ #include "fmt/format.h"
+ 
++#ifndef __ANDROID__
+ #include <dbus/dbus.h>
++#endif
+ #include <spawn.h>
+ #include <sys/sysinfo.h>
+ #include <sys/time.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
++#ifndef __ANDROID__
+ #include <X11/Xlib.h>
+ #include <X11/extensions/XInput2.h>
++#endif
+ 
+ #include <cstdlib>
+ #include <cstring>
+@@ -140,6 +144,7 @@ std::string GetOSVersionString()
+ #endif
+ }
+ 
++#ifndef __ANDROID__
+ static bool SetScreensaverInhibitDBus(const bool inhibit_requested, const char* program_name, const char* reason)
+ {
+ 	static dbus_uint32_t s_cookie;
+@@ -329,9 +334,17 @@ void Common::DetachMousePositionCb()
+ 	}
+ }
+ 
++#else
++// Android: no D-Bus or X server. The app keeps the screen on itself (SDL), and there is no host mouse to track.
++bool Common::InhibitScreensaver(bool) { return false; }
++void Common::SetMousePosition(int, int) {}
++bool Common::AttachMousePositionCb(std::function<void(int, int)>) { return false; }
++void Common::DetachMousePositionCb() {}
++#endif
++
+ bool Common::PlaySoundAsync(const char* path)
+ {
+-#ifdef __linux__
++#if defined(__linux__) && !defined(__ANDROID__)
+ 	// This is... pretty awful. But I can't think of a better way without linking to e.g. gstreamer.
+ 	const char* cmdname = "aplay";
+ 	const char* argv[] = {cmdname, path, nullptr};
+diff --git a/common/WindowInfo.h b/common/WindowInfo.h
+index 4ccad5a4d..c0865f4b6 100644
+--- a/common/WindowInfo.h
++++ b/common/WindowInfo.h
+@@ -15,7 +15,8 @@ struct WindowInfo
+ 		Win32,
+ 		X11,
+ 		Wayland,
+-		MacOS
++		MacOS,
++		Android, // RRV: window_handle is the ANativeWindow*
+ 	};
+ 
+ 	/// The type of the surface. Surfaceless indicates it will not be displayed on screen at all.
+diff --git a/pcsx2-gsrunner/Main.cpp b/pcsx2-gsrunner/Main.cpp
+index de624db4e..be1f485f9 100644
+--- a/pcsx2-gsrunner/Main.cpp
++++ b/pcsx2-gsrunner/Main.cpp
+@@ -49,7 +49,7 @@
+ #include "svnrev.h"
+ 
+ // Down here because X11 has a lot of defines that can conflict
+-#if defined(__linux__)
++#if defined(__linux__) && !defined(__ANDROID__)
+ #include <X11/Xlib.h>
+ #include <X11/Xutil.h>
+ #include <sys/select.h>
+@@ -1215,6 +1215,21 @@ void GSRunner::StopPlatformMessagePump()
+ 	CocoaTools::StopMainThreadEventLoop();
+ }
+ 
++#elif defined(__ANDROID__)
++
++// RRV Android: no platform window of its own; the RRV bridge hands PCSX2 the app's ANativeWindow
++// (rrv_pcsx2_gs_bridge_configure_native_surface).
++bool GSRunner::CreatePlatformWindow() { return false; }
++void GSRunner::DestroyPlatformWindow() {}
++std::optional<WindowInfo> GSRunner::GetPlatformWindowInfo()
++{
++	WindowInfo wi;
++	wi.type = WindowInfo::Type::Surfaceless;
++	return wi;
++}
++void GSRunner::PumpPlatformMessages(bool) {}
++void GSRunner::StopPlatformMessagePump() {}
++
+ #elif defined(__linux__)
+ static Display* s_display = nullptr;
+ static Window s_window = None;
+diff --git a/pcsx2/CDVD/Linux/DriveUtility.cpp b/pcsx2/CDVD/Linux/DriveUtility.cpp
+index 6e3a4c28f..92e4e85ba 100644
+--- a/pcsx2/CDVD/Linux/DriveUtility.cpp
++++ b/pcsx2/CDVD/Linux/DriveUtility.cpp
+@@ -3,7 +3,9 @@
+ 
+ #include "CDVD/CDVDdiscReader.h"
+ 
++#ifndef __ANDROID__
+ #include <libudev.h>
++#endif
+ #include <linux/cdrom.h>
+ #include <fcntl.h>
+ #include <sys/ioctl.h>
+@@ -11,6 +13,9 @@
+ 
+ std::vector<std::string> GetOpticalDriveList()
+ {
++#ifdef __ANDROID__
++	return {}; // RRV Android: no optical drives (and no udev)
++#else
+ 	udev* udev_context = udev_new();
+ 	if (!udev_context)
+ 		return {};
+@@ -39,6 +44,7 @@ std::vector<std::string> GetOpticalDriveList()
+ 	udev_unref(udev_context);
+ 
+ 	return drives;
++#endif
+ }
+ 
+ void GetValidDrive(std::string& drive)
+diff --git a/pcsx2/CMakeLists.txt b/pcsx2/CMakeLists.txt
+index 4652ff99f..837d87668 100644
+--- a/pcsx2/CMakeLists.txt
++++ b/pcsx2/CMakeLists.txt
+@@ -1121,9 +1121,11 @@ if(LINUX)
+ 		${pcsx2LinuxHeaders}
+ 		)
+ 
++	if(NOT ANDROID)
+ 	target_link_libraries(PCSX2_FLAGS INTERFACE
+ 		PkgConfig::LIBUDEV
+ 	)
++	endif()
+ endif()
+ 
+ if(WIN32)
+@@ -1247,6 +1249,14 @@ fixup_file_properties(PCSX2)
+ # To ensure the dependency build script's headers are preferred, push any directories that look like */local/include to the end.
+ force_include_last(PCSX2_FLAGS "/(usr|local)/include/?$")
+ 
++if (ANDROID)
++	# RRV Android: static libwebp needs its sharpyuv helper, which FindWebP does not name.
++	find_library(RRV_SHARPYUV_LIBRARY sharpyuv REQUIRED)
++	target_link_libraries(PCSX2_FLAGS INTERFACE ${RRV_SHARPYUV_LIBRARY} android log)
++	# Static shaderc (libshaderc_combined.a, tools/android/build-deps.sh), bound directly in VKShaderCache.cpp.
++	target_link_libraries(PCSX2_FLAGS INTERFACE ${SHADERC_LIBRARY})
++endif()
++
+ if (APPLE)
+ 	find_library(APPKIT_LIBRARY AppKit)
+ 	find_library(IOKIT_LIBRARY IOKit)
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index 280d67797..e72efefd0 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -1155,6 +1155,9 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ #include <unistd.h>
++#ifdef __ANDROID__
++#include <sys/syscall.h>
++#endif
+ 
+ static int s_shm_fd = -1;
+ 
+@@ -1163,11 +1166,19 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
+ 	pxAssert(s_shm_fd == -1);
+ 
+ 	const char* file_name = "/GS.mem";
++#ifdef __ANDROID__
++	// RRV Android: no shm_open in bionic; an anonymous memfd maps the same way (memfd_create's libc wrapper is API 30).
++	s_shm_fd = static_cast<int>(syscall(__NR_memfd_create, "GS.mem", 0));
++	if (s_shm_fd != -1)
++	{
++	}
++#else
+ 	s_shm_fd = shm_open(file_name, O_RDWR | O_CREAT | O_EXCL, 0600);
+ 	if (s_shm_fd != -1)
+ 	{
+ 		shm_unlink(file_name); // file is deleted but descriptor is still open
+ 	}
++#endif
+ 	else
+ 	{
+ 		fprintf(stderr, "Failed to open %s due to %s\n", file_name, strerror(errno));
+diff --git a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
+index 8bf81e6d4..5a9cb6943 100644
+--- a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
+@@ -198,6 +198,10 @@ bool GSDeviceVK::SelectInstanceExtensions(ExtensionList* extension_list, const W
+ 	if (wi.type == WindowInfo::Type::MacOS && !SupportsExtension(VK_EXT_METAL_SURFACE_EXTENSION_NAME, true))
+ 		return false;
+ #endif
++#if defined(VK_USE_PLATFORM_ANDROID_KHR)
++	if (wi.type == WindowInfo::Type::Android && !SupportsExtension(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME, true))
++		return false;
++#endif
+ 
+ 	// VK_EXT_debug_utils
+ 	if (enable_debug_utils && !SupportsExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, false))
+diff --git a/pcsx2/GS/Renderers/Vulkan/VKEntryPoints.inl b/pcsx2/GS/Renderers/Vulkan/VKEntryPoints.inl
+index b4c9f3652..7457ca4e2 100644
+--- a/pcsx2/GS/Renderers/Vulkan/VKEntryPoints.inl
++++ b/pcsx2/GS/Renderers/Vulkan/VKEntryPoints.inl
+@@ -56,6 +56,10 @@ VULKAN_INSTANCE_ENTRY_POINT(vkCreateWaylandSurfaceKHR, false)
+ VULKAN_INSTANCE_ENTRY_POINT(vkCreateMetalSurfaceEXT, false)
+ #endif
+ 
++#if defined(VK_USE_PLATFORM_ANDROID_KHR)
++VULKAN_INSTANCE_ENTRY_POINT(vkCreateAndroidSurfaceKHR, false)
++#endif
++
+ // VK_EXT_debug_utils
+ VULKAN_INSTANCE_ENTRY_POINT(vkCmdBeginDebugUtilsLabelEXT, false)
+ VULKAN_INSTANCE_ENTRY_POINT(vkCmdEndDebugUtilsLabelEXT, false)
+diff --git a/pcsx2/GS/Renderers/Vulkan/VKLoader.h b/pcsx2/GS/Renderers/Vulkan/VKLoader.h
+index 65c11f8f3..75d0055fa 100644
+--- a/pcsx2/GS/Renderers/Vulkan/VKLoader.h
++++ b/pcsx2/GS/Renderers/Vulkan/VKLoader.h
+@@ -26,6 +26,10 @@ class Error;
+ #define VK_USE_PLATFORM_METAL_EXT
+ #endif
+ 
++#if defined(__ANDROID__)
++#define VK_USE_PLATFORM_ANDROID_KHR
++#endif
++
+ #include "vulkan/vulkan.h"
+ 
+ #if defined(X11_API)
+diff --git a/pcsx2/GS/Renderers/Vulkan/VKShaderCache.cpp b/pcsx2/GS/Renderers/Vulkan/VKShaderCache.cpp
+index 5f8b2ba4e..6b43417d4 100644
+--- a/pcsx2/GS/Renderers/Vulkan/VKShaderCache.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/VKShaderCache.cpp
+@@ -137,6 +137,23 @@ bool dyn_shaderc::Open()
+ 	if (s_library.IsOpen())
+ 		return true;
+ 
++#ifdef __ANDROID__
++	// RRV Android: shaderc is linked statically into the bridge (an APK holds no versioned .so names), so the
++	// functions are bound directly instead of through dlopen.
++	if (s_compiler)
++		return true;
++#define BIND_FUNC(F) F = &::F;
++	SHADERC_FUNCTIONS(BIND_FUNC)
++#undef BIND_FUNC
++	s_compiler = shaderc_compiler_initialize();
++	if (!s_compiler)
++	{
++		ERROR_LOG("shaderc_compiler_initialize() failed");
++		return false;
++	}
++	return true;
++#endif
++
+ 	Error error;
+ 
+ #ifdef _WIN32
+diff --git a/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp b/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp
+index 59a3a6f4c..7235642aa 100644
+--- a/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp
+@@ -112,6 +112,24 @@ VkSurfaceKHR VKSwapChain::CreateVulkanSurface(VkInstance instance, VkPhysicalDev
+ 	}
+ #endif
+ 
++#if defined(VK_USE_PLATFORM_ANDROID_KHR)
++	if (wi->type == WindowInfo::Type::Android)
++	{
++		VkAndroidSurfaceCreateInfoKHR surface_create_info = {VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, nullptr,
++			0, static_cast<ANativeWindow*>(wi->window_handle)};
++
++		VkSurfaceKHR surface;
++		VkResult res = vkCreateAndroidSurfaceKHR(instance, &surface_create_info, nullptr, &surface);
++		if (res != VK_SUCCESS)
++		{
++			LOG_VULKAN_ERROR(res, "vkCreateAndroidSurfaceKHR failed: ");
++			return VK_NULL_HANDLE;
++		}
++
++		return surface;
++	}
++#endif
++
+ #if defined(VK_USE_PLATFORM_METAL_EXT)
+ 	if (wi->type == WindowInfo::Type::MacOS)
+ 	{

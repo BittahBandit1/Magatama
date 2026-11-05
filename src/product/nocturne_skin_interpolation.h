@@ -14,7 +14,9 @@
 #include "nocturne_pose_math.h"
 
 #include <array>
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -38,6 +40,7 @@ class Interpolator {
     std::unordered_map<uint32_t,Entry> entries_;
     std::unordered_map<uint32_t,uint64_t> badRoots_; // model root -> frame with a packet left at its endpoint
     std::atomic<bool> firstDraw_{false};
+    std::atomic<uint64_t> drawGen_{0};
     uint64_t generated_=0, registered_=0, sizeMismatch_=0, noHistory_=0, rejected_=0, substituted_=0, stale_=0, partial_=0, resized_=0;
 
     static bool elementwise(const uint8_t* a,const uint8_t* b,uint8_t* out){
@@ -59,7 +62,8 @@ class Interpolator {
         h.cur.b.fill(0);std::memcpy(h.cur.b.data(),now,bytes);h.gen=gen_;h.midGen=0;return true;
     }
 public:
-    int lastWhy=0; // diagnostics: 1 no history, 2 discontinuity, 3 changed within a frame
+    int lastWhy=0;
+    bool debugChain=false; // diagnostics: 1 no history, 2 discontinuity, 3 changed within a frame
     void configure(){configured_=true;}
     bool enabled() const{return configured_;}
     std::mutex& mutex(){return mutex_;}
@@ -67,6 +71,37 @@ public:
     // Called (under mutex) at the top of each generator call. `frame` is the
     // guest's double-buffer index; a change starts a new built frame.
     void frame(int32_t f){if(f!=lastFrame_){lastFrame_=f;++gen_;}}
+    uint64_t generation() const{return gen_;}
+
+    // Real-time budget for the halfway passes (host microseconds per built
+    // frame). The extra pass must never make the game fall behind: when a
+    // built frame takes longer than a 2-field frame, the budget shrinks;
+    // while frames keep time it grows back. Decided per model per frame.
+    struct Budget {
+        uint64_t gen=0; std::chrono::steady_clock::time_point start{};
+        double budgetUs=6000, spentUs=0; std::unordered_map<uint32_t,bool> allowed;
+        uint64_t skippedModels=0, frames=0, slowFrames=0;
+    } budget;
+    bool allow(uint32_t root){
+        auto& b=budget;const auto now=std::chrono::steady_clock::now();
+        if(b.gen!=gen_){
+            if(b.gen&&b.gen+1==gen_){
+                const double frameUs=std::chrono::duration<double,std::micro>(now-b.start).count();
+                ++b.frames;
+                // 2 fields at 59.94 Hz = 33.37 ms; allow a little scheduling noise.
+                // A one-off hitch (loading, >100 ms) says nothing about this
+                // pass; an ordinary overrun takes the overrun back out of it.
+                if(frameUs>34500&&frameUs<100000){++b.slowFrames;b.budgetUs=std::max(0.0,std::min(b.budgetUs,b.spentUs)-(frameUs-33370)-500);}
+                else if(frameUs<=34500)b.budgetUs=std::min(20000.0,b.budgetUs+1000);
+            }
+            b.gen=gen_;b.start=now;b.spentUs=0;b.allowed.clear();
+        }
+        auto i=b.allowed.find(root);
+        if(i==b.allowed.end())i=b.allowed.emplace(root,b.spentUs<b.budgetUs).first;
+        if(!i->second)++b.skippedModels;
+        return i->second;
+    }
+    void spent(double us){budget.spentUs+=us;}
 
     // Bone/node halfway TM (128 bytes, VU1 TM packet layout). False: no
     // usable history or a discontinuity (teleport, cut, large turn).
@@ -84,9 +119,32 @@ public:
         if(!h.midOk){if(h.prevGen+1!=gen_){++noHistory_;lastWhy=1;}else{++rejected_;lastWhy=2;}return false;}
         std::memcpy(out,h.mid.b.data(),128);return true;
     }
+    // The main camera's view packet (176 bytes: view, view*projection, ...)
+    // as the game builds it each frame (EE, before the frame's models). With
+    // it the halfway screen matrix is the exact one the VU1 path draws rigid
+    // parts with (pose::cameraPacket), so eyes and weapons stay on the body.
+    struct Camera { std::array<uint8_t,176> data{}; int32_t frame=-1; uint64_t gen=0; bool valid=false; };
+    Camera camCur_, camPrev_;
+    uint64_t cameraMatched_=0, cameraFallback_=0;
+    void camera(int32_t frame,const uint8_t* view){
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(camCur_.valid&&camCur_.frame==frame&&camCur_.gen+1>=gen_){std::memcpy(camCur_.data.data(),view,176);return;}
+        camPrev_=camCur_;camCur_.frame=frame;camCur_.gen=gen_;camCur_.valid=true;std::memcpy(camCur_.data.data(),view,176);
+    }
+    void forgetNode(uint32_t node){nodes_.erase(node);++staleNodes_;}
+    uint64_t staleNodes_=0;
     // Screen matrix (64 bytes) as used with one model root: halfway element
     // by element; refuse cuts. Keyed by root so each view keeps its history.
     bool screenMid(uint32_t root,const uint8_t* now,uint8_t* out){
+        // Main camera: interpolate exactly like the VU1 path does.
+        if(camCur_.valid&&camPrev_.valid&&camCur_.frame==lastFrame_&&(camCur_.gen+1==gen_||camCur_.gen==gen_)&&
+           camPrev_.gen+1==camCur_.gen&&std::memcmp(now,camCur_.data.data()+64,64)==0){
+            uint8_t o[176];
+            auto& h=screens_[root];observe(h,now,64); // keep the fallback history current
+            if(!pose::cameraPacket(camPrev_.data.data(),camCur_.data.data(),.5f,o)){++rejected_;return false;}
+            ++cameraMatched_;std::memcpy(out,o+64,64);return true;
+        }
+        ++cameraFallback_;
         auto& h=screens_[root];if(!observe(h,now,64)){++rejected_;return false;}
         if(h.prevGen+1!=gen_){++noHistory_;return false;}
         float a[16],b[16],m[16],diff=0,mag=1e-6f;std::memcpy(a,h.prev.b.data(),64);std::memcpy(b,h.cur.b.data(),64);
@@ -100,7 +158,9 @@ public:
     // stream whole, whatever its length.
     void record(uint32_t root,uint32_t address,const uint8_t* endpoint,const uint8_t* mid,uint32_t bytes,uint32_t midBytes){
         ++generated_;
-        if(!bytes||!midBytes||midBytes>4*bytes+4096){++sizeMismatch_;entries_.erase(address);bad(root);return;}
+        // An empty halfway packet (every face culled at the halfway pose) is
+        // valid: that part draws nothing in the in-between field.
+        if(!bytes||midBytes>4*bytes+4096){++sizeMismatch_;entries_.erase(address);bad(root);return;}
         if(midBytes!=bytes)++resized_;
         auto& e=entries_[address];e.gen=gen_;e.root=root;e.used=false;
         e.endpoint.assign(endpoint,endpoint+bytes);e.mid.assign(mid,mid+midBytes);++registered_;
@@ -111,6 +171,14 @@ public:
     // A model keeps one pose per draw: if any of its packets stays at the
     // endpoint this frame, none of them takes the halfway pose.
     void bad(uint32_t root){if(root)badRoots_[root]=gen_;}
+    // Rigid parts of a model drawn through VU1 (eyes, weapons) must follow
+    // its skinned body: true when this model kept its endpoint pose in the
+    // frame just built (or the one being built).
+    bool rootHeldBack(uint32_t root){
+        std::lock_guard<std::mutex> lock(mutex_);
+        // The frame on screen is the one built when its draw started.
+        auto i=badRoots_.find(root);return i!=badRoots_.end()&&i->second==drawGen_.load(std::memory_order_acquire);
+    }
     // Drop histories of models not drawn for a while (freed nodes, new scenes).
     void prune(){
         if(nodes_.size()<16384&&screens_.size()<1024)return;
@@ -119,7 +187,7 @@ public:
     }
 
     // sdfDeliverDrawStart: is the draw about to be kicked the first of a pair?
-    void drawStart(bool first){firstDraw_.store(first,std::memory_order_release);}
+    void drawStart(bool first){firstDraw_.store(first,std::memory_order_release);if(first)drawGen_.store(gen_,std::memory_order_release);}
     // VIF1 chain gather (EE thread, inside sceDmaSend): substitute in place.
     void chain(uint32_t source,std::vector<uint8_t>& stream,size_t offset,uint32_t bytes){
         if(!firstDraw_.load(std::memory_order_acquire))return;
@@ -128,11 +196,17 @@ public:
         auto& e=i->second;
         if(offset+bytes!=stream.size()){++stale_;return;}
         const uint8_t* data=stream.data()+offset;
-        if(e.used||e.endpoint.size()!=bytes||std::memcmp(e.endpoint.data(),data,bytes)!=0){++stale_;return;}
-        if(auto r=badRoots_.find(e.root);r!=badRoots_.end()&&r->second==e.gen){++partial_;return;}
+        // Only the frame on screen (built in this generation or the one before) may
+        // substitute: an older entry whose bytes happen to match would put a stale
+        // in-between pose on a part (a packet the game kept from an earlier frame).
+        if(e.gen+1<gen_){++stale_;entries_.erase(i);return;}
+        if(e.used||e.endpoint.size()!=bytes||std::memcmp(e.endpoint.data(),data,bytes)!=0){++stale_;if(debugChain)std::fprintf(stderr,"[skin-debug] chain-stale root=%06x used=%d size=%zu/%u\n",e.root,int(e.used),e.endpoint.size(),bytes);return;}
+        if(auto r=badRoots_.find(e.root);r!=badRoots_.end()&&r->second==e.gen){++partial_;if(debugChain)std::fprintf(stderr,"[skin-debug] chain-held root=%06x\n",e.root);return;}
+        if(debugChain)std::fprintf(stderr,"[skin-debug] chain-sub root=%06x at=%06x entry-gen=%llu gen=%llu bytes=%u mid=%zu\n",e.root,source&0x01ffffffu,(unsigned long long)e.gen,(unsigned long long)gen_,bytes,e.mid.size());
         stream.resize(offset);stream.insert(stream.end(),e.mid.begin(),e.mid.end());e.used=true;++substituted_;
     }
     ~Interpolator(){
+        if(configured_)std::fprintf(stderr,"[skin-interpolation] budget frames=%llu slow=%llu skipped-model-calls=%llu final-budget-us=%.0f camera-matched=%llu camera-fallback=%llu stale-node-slots=%llu\n",(unsigned long long)budget.frames,(unsigned long long)budget.slowFrames,(unsigned long long)budget.skippedModels,budget.budgetUs,(unsigned long long)cameraMatched_,(unsigned long long)cameraFallback_,(unsigned long long)staleNodes_);
         if(configured_)std::fprintf(stderr,"[skin-interpolation] packets=%llu halfway=%llu resized=%llu size-mismatch=%llu no-history=%llu rejected=%llu substituted=%llu stale=%llu whole-model-fallback=%llu\n",
             (unsigned long long)generated_,(unsigned long long)registered_,(unsigned long long)resized_,(unsigned long long)sizeMismatch_,(unsigned long long)noHistory_,
             (unsigned long long)rejected_,(unsigned long long)substituted_,(unsigned long long)stale_,(unsigned long long)partial_);

@@ -1,0 +1,28 @@
+--- a/bridge.cpp
++++ b/bridge.cpp
+@@ -8,6 +8,9 @@
+ // clean-worktree script; it never modifies the pinned, dirty PCSX2 checkout.
+ 
+ #define RRV_PCSX2_GS_BRIDGE_BUILD 1
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
+ #include "rrv_pcsx2_gs_bridge.h"
+ #if defined(RRV_PCSX2_GS_CANONICAL_RECEIPTS)
+ #include "canonical_receipt.h"
+@@ -286,8 +289,14 @@
+     // environment, bundle, and default-library fallbacks would sever that
+     // source-derived authority.
+     const std::string bridge_directory = GetBridgeDirectory();
+-    const std::string staged_resources = bridge_directory.empty() ? std::string{} :
++    std::string staged_resources = bridge_directory.empty() ? std::string{} :
+         Path::Combine(bridge_directory, "resources");
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    // iOS: the bridge is a signed library in App.app/Frameworks; its resources stay in the app's game package
++    // (App.app/game/package/resources), since an iOS bundle's Frameworks folder holds only code.
++    if (!bridge_directory.empty() && !FileSystem::DirectoryExists(staged_resources.c_str()))
++        staged_resources = Path::Combine(Path::GetDirectory(bridge_directory), "game/package/resources");
++#endif
+     if (!staged_resources.empty() && FileSystem::DirectoryExists(staged_resources.c_str()))
+         EmuFolders::Resources = Path::Canonicalize(staged_resources);
+     else

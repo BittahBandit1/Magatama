@@ -5,13 +5,19 @@ set(_RRV_RP_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 function(_rrv_rp_require_native)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND
-       CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64")
-        # Gate 5: native Linux x86-64 (Steam Deck); same fixed-root contract.
+       CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|aarch64)$" AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL CMAKE_SYSTEM_PROCESSOR)
+        # Gate 5: native Linux x86-64 (Steam Deck); Magatama adds native Linux ARM64. Same fixed-root contract.
     elseif(WIN32 AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows" AND
            CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64)$" AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64)$")
         # Windows x86-64: the same fixed-root contract through the path-based backend of resource_package_fs.py.
+    elseif(ANDROID AND CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+        # Magatama Android: cross-built (scripts/magatama_build_android.sh); the package goes into the APK's assets
+        # and is extracted on the device, with the APK's own bridge library.
+    elseif(IOS AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64" AND CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+        # Magatama iOS: built on an Apple Silicon Mac; the package is staged into the app bundle
+        # (scripts/magatama_build_ios.sh) with the iOS bridge in place of the macOS one.
     elseif(NOT APPLE OR NOT CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64" OR NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR (CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64"))
-        message(FATAL_ERROR "ADR-0006 resource package requires native macOS arm64, Linux x86-64 or Windows x86-64")
+        message(FATAL_ERROR "ADR-0006 resource package requires native macOS arm64, Linux x86-64/aarch64 or Windows x86-64")
     endif()
     if(NOT CMAKE_GENERATOR STREQUAL "Ninja" OR CMAKE_CONFIGURATION_TYPES OR NOT CMAKE_BUILD_TYPE STREQUAL "Release")
         message(FATAL_ERROR "ADR-0006 resource package requires single-config Ninja Release")

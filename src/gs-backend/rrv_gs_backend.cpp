@@ -49,6 +49,7 @@ namespace
     constexpr uint32_t kSurfaceLinuxX11 = 2u;     // Gate 5 (Linux/Steam Deck)
     constexpr uint32_t kSurfaceLinuxWayland = 3u; // Gate 5 (Linux/Steam Deck)
     constexpr uint32_t kSurfaceWin32 = 4u;        // Windows: HWND + HINSTANCE
+    constexpr uint32_t kSurfaceAndroid = 5u;      // Android: ANativeWindow*
     constexpr uint32_t kSurfaceCallerOwnsHandles = 1u << 0;
     constexpr uint32_t kSurfaceMainThreadPrepared = 1u << 1;
     constexpr uint32_t kCapabilityDirectPresent = 1u << 2;
@@ -401,8 +402,9 @@ bool Backend::initialize(const InitializeOptions &options, std::string *error)
             return setError(error,"Original-frame presentation is experimental and currently requires direct Metal");
         m_originalPresentation=std::make_unique<OriginalPresentation>();
     }
-    if(magatama::aspect::target.load(std::memory_order_relaxed)>0.f)
-        magatama::aspect::filters().reset(this);
+    // Always registered: the in-game menu can turn the Nocturne aspect on after a launch with it off, and the
+    // filter is only consulted while a target ratio is set.
+    magatama::aspect::filters().reset(this);
     const char *execution = std::getenv("RRV_GS_EXECUTION");
     m_workerVerify = std::getenv("RRV_GS_WORKER_VERIFY") != nullptr;
     m_verifySubmitted = m_verifyConsumed = 0;
@@ -552,6 +554,7 @@ bool Backend::loadBridge(const InitializeOptions &options, std::string *error)
     case NativeSurfaceKind::LinuxX11: surfaceKind = kSurfaceLinuxX11; break;
     case NativeSurfaceKind::LinuxWayland: surfaceKind = kSurfaceLinuxWayland; break;
     case NativeSurfaceKind::Win32: surfaceKind = kSurfaceWin32; break;
+    case NativeSurfaceKind::Android: surfaceKind = kSurfaceAndroid; break;
     case NativeSurfaceKind::None: break;
     }
     BridgeSurface surface{sizeof(BridgeSurface), surfaceKind,

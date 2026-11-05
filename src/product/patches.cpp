@@ -42,6 +42,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <mutex>
@@ -206,6 +207,24 @@ magatama::pose_trace::Record poseRecord(uint8_t* ram,PS2Runtime* rt,uint32_t kin
     magatama::pose_trace::Record r;r.kind=kind;r.field=rt->gate3TemporalV1().starts();
     r.kernel=poseWord(ram,0x54e800);r.request=poseWord(ram,0x551898);return r;
 }
+// MAGATAMA_INTERP_PROFILE=1: real-time cost of each 60 FPS stage, printed
+// every 300 fields. Off: one predictable branch per hook.
+struct InterpProfile {
+    bool on=[]{const char* v=std::getenv("MAGATAMA_INTERP_PROFILE");return v&&v[0]=='1';}();
+    std::atomic<uint64_t> observeNs{0},postNs{0},publishNs{0},unpackNs{0},skinNs{0},records{0},unpacks{0},draws{0};
+    uint64_t lastField=0;std::chrono::steady_clock::time_point last=std::chrono::steady_clock::now();
+    static uint64_t now(){return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+    void report(uint64_t field){
+        if(!on||field<lastField+300)return;
+        const auto t=std::chrono::steady_clock::now();const double secs=std::chrono::duration<double>(t-last).count();
+        const double n=double(field-lastField),ms=1e-6/n;
+        std::fprintf(stderr,"[interp-profile] field=%llu fields/s=%.1f per-field ms: ee-observe=%.3f ee-post=%.3f owner-publish=%.3f owner-unpack=%.3f ee-skin=%.3f | per-field records=%.0f unpacks=%.0f\n",
+            (unsigned long long)field,n/secs,observeNs.exchange(0)*ms,postNs.exchange(0)*ms,publishNs.exchange(0)*ms,unpackNs.exchange(0)*ms,skinNs.exchange(0)*ms,
+            records.exchange(0)/n,unpacks.exchange(0)/n);
+        lastField=field;last=t;
+    }
+};
+InterpProfile& interpProfile(){static InterpProfile p;return p;}
 // Observe the completed original packet-building leaf at its two verified
 // model call sites. A whole recursive evaluation can yield before returning;
 // the leaf identifies both persistent and temporary packets without that assumption.
@@ -216,6 +235,8 @@ void observeTransformPacket(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
     if(ret==0x2b1becu && GPR_U32(c,30)>=0xc0u)node=poseAddress(GPR_U32(c,30)-0xc0u,0x100);
     g_poseTm(ram,c,rt);
     if(!node || !packet || c->pc!=ret)return;
+    auto& prof=interpProfile();const uint64_t t0=prof.on?InterpProfile::now():0;
+    struct Done{InterpProfile& p;uint64_t t0;~Done(){if(p.on){p.observeNs+=InterpProfile::now()-t0;++p.records;}}} done{prof,t0};
     auto r=poseRecord(ram,rt,'P');if(!magatama::pose::interpolator().enabled() && !magatama::pose_trace::Trace::window(r.field))return;
     r.node=node;r.root=poseWord(ram,node+0x10);r.shape=poseWord(ram,node+0x38);
     r.packet=packet;r.slot=ret;r.mode=poseWord(ram,node+0x18);r.bytes=128;
@@ -240,6 +261,10 @@ void observeCameraPose(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
     r.mode=poseWord(ram,0x320e68);r.flags=poseWord(ram,0x320e6c);
     std::memcpy(r.data.data(),ram+packet+16,176);std::memcpy(r.data.data()+176,ram+param,32);
     publishRenderPose(r);
+    // Main view (USA screen record 0x2F59B0): share it with the skinned-model
+    // pass so both paths use one halfway camera. sdfFrameId is USA 0x551842.
+    if(param==0x2f59b0u&&magatama::skin::interpolator().enabled())
+        magatama::skin::interpolator().camera(int32_t(ram[0x551842]),ram+packet+16);
 }
 void observeDrawStart(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
     auto r=poseRecord(ram,rt,'S');r.mode=GPR_U32(c,4);r.slot=GPR_U32(c,5);
@@ -248,6 +273,10 @@ void observeDrawStart(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
         // The halfway skinned packets replace the endpoint only in the first
         // draw of a 2-field frame; the second draw stays byte-for-byte original.
         uint16_t next=0;std::memcpy(&next,ram+0x54e82c,2);
+        static const std::pair<uint64_t,uint64_t> chainDebug=[]{unsigned long long a=0,b=0;const char* v=std::getenv("MAGATAMA_SKIN_DEBUG");
+            if(v&&std::sscanf(v,"%llu-%llu",&a,&b)==2&&b>a)return std::pair<uint64_t,uint64_t>{a,b};return std::pair<uint64_t,uint64_t>{0,0};}();
+        magatama::skin::interpolator().debugChain=r.field>=chainDebug.first&&r.field<chainDebug.second;
+        if(magatama::skin::interpolator().debugChain)std::fprintf(stderr,"[skin-debug] draw-start field=%llu mode=%u slot=%u cadence=%u gen=%llu\n",(unsigned long long)r.field,r.mode,r.slot,unsigned(next),(unsigned long long)magatama::skin::interpolator().generation());
         magatama::skin::interpolator().drawStart(r.mode==0&&r.slot<=1&&next==2&&
             !magatama::original_frame::hostMenu.load(std::memory_order_acquire)&&
             !magatama::original_frame::fastForward.load(std::memory_order_acquire));
@@ -258,12 +287,16 @@ void observeDrawStart(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
     const bool overflow=g_renderPoseOverflow;g_renderPoseOverflow=false;
     const size_t charge=sizeof(r)+batch.size()*sizeof(r);
     auto command=[r,overflow,batch=std::move(batch)]{
+        auto& prof=interpProfile();const uint64_t t0=prof.on?InterpProfile::now():0;
         if(overflow)magatama::pose::interpolator().reset();
         else for(const auto& pose:batch)magatama::pose::interpolator().publish(pose);
         magatama::pose::interpolator().begin(r);magatama::pose_trace::trace().begin(r);
+        if(prof.on)prof.publishNs+=InterpProfile::now()-t0;
     };
+    auto& prof=interpProfile();const uint64_t t0=prof.on?InterpProfile::now():0;
     if(rt->memory().ownerStreamV1())rt->memory().ownerPostV1(std::move(command),charge,0,false);
     else command();
+    if(prof.on){prof.postNs+=InterpProfile::now()-t0;prof.report(r.field);}
 }
 void observeModelFree(uint8_t* ram,R5900Context* c,PS2Runtime* rt) {
     auto r=poseRecord(ram,rt,'F');r.node=GPR_U32(c,4);publishRenderPose(r);g_poseFree(ram,c,rt);
@@ -279,7 +312,12 @@ uint32_t skinPayload(const uint8_t* ram,uint32_t header,uint32_t& bytes){
     uint32_t tag;std::memcpy(&tag,ram+h,4);bytes=(tag&0xffffu)*16u;
     if(bytes>32u*1024*1024-16-h){bytes=0;return 0;}return h+16;
 }
+void skinGenerateInner(uint8_t* ram,R5900Context* c,PS2Runtime* rt);
 void skinGenerate(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
+    auto& prof=interpProfile();if(!prof.on){skinGenerateInner(ram,c,rt);return;}
+    const uint64_t t0=InterpProfile::now();skinGenerateInner(ram,c,rt);prof.skinNs+=InterpProfile::now()-t0;
+}
+void skinGenerateInner(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
     auto& skin=magatama::skin::interpolator();
     const uint32_t ra=GPR_U32(c,31),node=skinPhys(GPR_U32(c,4));const int32_t frame=int32_t(GPR_U32(c,8));
     struct Slot{uint32_t at;std::array<uint8_t,128> mid;};
@@ -295,6 +333,7 @@ void skinGenerate(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
         std::lock_guard<std::mutex> lock(skin.mutex());
         skin.frame(frame);
         const uint32_t list=root?skinPhys(poseWord(ram,root)):0;
+        if(!((frame==0||frame==1)&&list)&&debugOn(rt))std::fprintf(stderr,"[skin-debug] no-list field=%llu root=%06x frame=%d\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,frame);
         if((frame==0||frame==1)&&list){
             int16_t count=0;std::memcpy(&count,ram+list+4,2);
             const uint32_t items=skinPhys(poseWord(ram,list+0xc));
@@ -307,16 +346,30 @@ void skinGenerate(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
                 const uint32_t at=tm+(uint32_t(frame)<<7);
                 if(at>32u*1024*1024-128){ready=valid=false;break;}
                 Slot slot{at,{}};
+                // The game copies node->tm (+0xC0) into this frame's TM slot when
+                // it evaluates the node. A slot that differs was not refreshed
+                // (hidden or newly shown part): leave it exactly as the game has
+                // it, and do not keep it as pose history.
+                if(n>32u*1024*1024-0x100||std::memcmp(ram+at,ram+n+0xc0,64)!=0){skin.forgetNode(n);continue;}
                 if(skin.nodeMid(n,ram+at,slot.mid.data()))slots.push_back(slot);else{ready=false;if(debugOn(rt)){++debugLines;std::fprintf(stderr,"[skin-debug] node-fail field=%llu root=%06x node=%06x i=%d/%d why=%d\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,n,i,count,skin.lastWhy);}}
             }
             const bool screenOk=ready&&!slots.empty()&&skin.screenMid(root,ram+kScreenTm,screenMid.data());
             if(ready&&!screenOk&&debugOn(rt)){++debugLines;std::fprintf(stderr,"[skin-debug] screen-fail field=%llu root=%06x\n",(unsigned long long)rt->gate3TemporalV1().starts(),root);}
             ready=screenOk;
         }
+        if(ready&&!skin.allow(root)){ready=false;if(debugOn(rt))std::fprintf(stderr,"[skin-debug] budget-skip field=%llu root=%06x gen=%llu\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,(unsigned long long)skin.generation());}
         if(!ready)skin.bad(root);
         skin.prune();
     }
-    if(!ready){g_skinGen(ram,c,rt);return;}
+    if(!ready){
+        // Original call only. Its packet address may still hold an in-between
+        // entry from an earlier frame (same buffer half): forget it, or the chain
+        // would substitute that old pose into this frame.
+        g_skinGen(ram,c,rt);
+        uint32_t bytes=0;const uint32_t at=c->pc==ra?skinPayload(ram,GPR_U32(c,2),bytes):0;
+        if(at){std::lock_guard<std::mutex> lock(skin.mutex());skin.forget(at);}
+        return;
+    }
     // Halfway pass: original code, original inputs except the matrices. It
     // runs on the guest clock like any other EE work (time never rewinds);
     // the borrowed registers and memory are put back afterwards.
@@ -325,7 +378,9 @@ void skinGenerate(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
     std::vector<std::array<uint8_t,128>> saved(slots.size());std::array<uint8_t,64> screenSaved;
     for(size_t i=0;i<slots.size();++i){std::memcpy(saved[i].data(),ram+slots[i].at,128);std::memcpy(ram+slots[i].at,slots[i].mid.data(),128);}
     std::memcpy(screenSaved.data(),ram+kScreenTm,64);std::memcpy(ram+kScreenTm,screenMid.data(),64);
+    const auto midStart=std::chrono::steady_clock::now();
     g_skinGen(ram,c,rt);
+    const double midUs=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-midStart).count();
     const bool midReturned=c->pc==ra;const uint32_t midHeader=GPR_U32(c,2);
     uint32_t midEnd;std::memcpy(&midEnd,ram+kPacketBuffPtr,4);
     uint32_t midBytes=0;const uint32_t midAt=midReturned?skinPayload(ram,midHeader,midBytes):0;
@@ -345,9 +400,14 @@ void skinGenerate(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
     // Endpoint pass: exactly the original call.
     g_skinGen(ram,c,rt);
     std::lock_guard<std::mutex> lock(skin.mutex());
+    skin.spent(midUs);
     uint32_t bytes=0;const uint32_t at=c->pc==ra?skinPayload(ram,GPR_U32(c,2),bytes):0;
-    if(!at){if(!midAt||!midBytes)return;skin.bad(root);return;} // both empty: nothing drawn
-    if(debugOn(rt))std::fprintf(stderr,"[skin-debug] packet field=%llu root=%06x node=%06x bytes=%u mid=%u\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,node,bytes,midBytes);
+    // Endpoint culled entirely but the halfway pose shows a sliver: there is
+    // no chain slot for it; that silhouette edge misses one field. The rest of
+    // the model still blends.
+    if(!at)return;
+    if(debugOn(rt))std::fprintf(stderr,"[skin-debug] packet field=%llu root=%06x node=%06x at=%06x gen=%llu bytes=%u mid=%u\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,node,at,(unsigned long long)skin.generation(),bytes,midBytes);
+    if(!midReturned){skin.bad(root);skin.forget(at);return;}
     skin.record(root,at,ram+at,mid.data(),bytes,midBytes);
 }
 void armRenderPoseTrace(PS2Runtime& rt) {
@@ -365,11 +425,14 @@ void armRenderPoseTrace(PS2Runtime& rt) {
     g_magatamaRenderUnpackObserver=[](uint32_t a,uint32_t cmd,uint32_t dest,const uint8_t* data,uint32_t bytes){
         magatama::pose_trace::trace().unpack(a,cmd,dest,data,bytes);};
     if(enabled)g_magatamaRenderUnpackTransform=[](uint32_t a,uint32_t cmd,const uint8_t* data,uint32_t bytes,uint8_t* out){
-        return magatama::pose::interpolator().unpack(a,cmd,data,bytes,out);};
+        auto& prof=interpProfile();if(!prof.on)return magatama::pose::interpolator().unpack(a,cmd,data,bytes,out);
+        const uint64_t t0=InterpProfile::now();const bool r=magatama::pose::interpolator().unpack(a,cmd,data,bytes,out);
+        prof.unpackNs+=InterpProfile::now()-t0;++prof.unpacks;return r;};
     // Characters: EE-skinned packets (MAGATAMA_INTERPOLATE_SKIN=0 disables).
     const char* skinEnv=std::getenv("MAGATAMA_INTERPOLATE_SKIN");
     if(enabled && !(skinEnv&&skinEnv[0]=='0')){
         magatama::skin::interpolator().configure();
+        magatama::pose::interpolator().rootHeldBack=[](uint32_t root){return magatama::skin::interpolator().rootHeldBack(root&0x01ffffffu);};
         wrap(0x2b9178,g_skinGen,skinGenerate);
         g_magatamaChainPatch=[](uint32_t source,std::vector<uint8_t>& stream,size_t offset,uint32_t bytes){
             magatama::skin::interpolator().chain(source,stream,offset,bytes);};
@@ -1441,6 +1504,32 @@ void nocturneScreenParam(uint8_t* ram, R5900Context* ctx, PS2Runtime* rt) {
     std::memcpy(ram + param + 4, &adjusted, 4);
     g_nocturneScreenParam(ram, ctx, rt);
 }
+// Disc-read waits. sdfFileRpcReadCallback (USA 0x2C7860) spins on
+// sdfGetRunTimeCount (0x2A8580) until each SIF DMA chunk lands, then for 0x64
+// more ticks. Every spin reads a hardware timer (a full guest-time checkpoint),
+// so battle loads cost far more host time than guest time and the whole game
+// drops to ~37 fields/s. In that spin only, guest time moves ahead in larger
+// steps, never past the next hardware deadline (the native-code window), so the
+// game waits exactly as long in its own time. MAGATAMA_FAST_LOAD_WAIT=0 disables.
+PS2Runtime::RecompiledFunction g_runTimeCount;
+uint64_t g_loadWaitSteps=0;
+void fastRunTimeCount(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
+    const uint32_t ra=GPR_U32(c,31);
+    if(ra>=0x2c7860u&&ra<0x2c79b8u){
+        uint64_t generation=0;const uint64_t limit=rt->gate4NativeLimitV1(c,generation);
+        const uint64_t now=rt->gate4NativeCyclesV1();
+        if(limit>now+1){const uint64_t target=std::min<uint64_t>(limit-1,now+20000);rt->gate4NativeCommitV1(c,target,target,true);++g_loadWaitSteps;}
+    }
+    g_runTimeCount(ram,c,rt);
+}
+void armFastLoadWait(PS2Runtime& rt){
+    const char* v=std::getenv("MAGATAMA_FAST_LOAD_WAIT");
+    if(v&&v[0]=='0')return;
+    if(!rt.hasFunction(0x2a8580))return;
+    g_runTimeCount=rt.lookupFunction(0x2a8580);rt.registerFunction(0x2a8580,fastRunTimeCount);
+    std::atexit([]{std::fprintf(stderr,"[load-wait] fast steps=%llu\n",(unsigned long long)g_loadWaitSteps);});
+    std::fprintf(stderr,"[load-wait] disc-read timer spins advance guest time in bounded steps\n");
+}
 void armNocturneAspect(PS2Runtime& rt) {
     // Keep neutral wrappers installed even for a legacy off launch, so a live
     // Escape-menu aspect change can enable projection without reloading ELF.
@@ -1605,6 +1694,7 @@ void registerPatches(PS2Runtime& runtime)
     if (const char* f448 = std::getenv("MAGATAMA_FRAME448"); f448 && f448[0] == '1') armFrame448(runtime);
     armFreeCamera(runtime);
     armNocturneAspect(runtime);
+    armFastLoadWait(runtime);
     if (const char* vr = std::getenv("MAGATAMA_TRACE_VRAM"); vr && vr[0] == '1') armVramTrace(runtime);
     if (const char* snd = std::getenv("MAGATAMA_TRACE_SOUND"); snd && snd[0] == '1') {
         armSoundTrace(runtime);

@@ -831,7 +831,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
                 std::array<uint8_t,208> renderCopy;
-                if (g_magatamaRenderUnpackObserver || g_magatamaRenderUnpackTransform)
+                // Only V4-32 matrix uploads matter here: 7 qwords (model/bone
+                // TM, any VU address) or 11 qwords (camera view). Skipping the
+                // source lookup for everything else keeps big scenes fast.
+                const uint32_t renderCmd=cmd&0x7fffffffu;
+                if ((g_magatamaRenderUnpackObserver || g_magatamaRenderUnpackTransform) &&
+                    ((totalBytes==112u && (renderCmd&~0x3ffu)==0x6c07c000u) ||
+                     (totalBytes==176u && renderCmd==0x6c0bc000u)))
                 {
                     uint32_t source=0xffffffffu;
                     const auto address=reinterpret_cast<uintptr_t>(srcBase);
@@ -841,12 +847,18 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     else if(m_vif1TraceSourceBlocks && m_vif1TraceDataBase)
                     {
                         const auto base=reinterpret_cast<uintptr_t>(m_vif1TraceDataBase);
-                        if(address>=base)for(const auto& block:*m_vif1TraceSourceBlocks)
+                        // Blocks are appended in stream order: binary search
+                        // for the last block starting at or before offset.
+                        if(address>=base && !m_vif1TraceSourceBlocks->empty())
                         {
                             const size_t offset=address-base;
+                            const auto& blocks=*m_vif1TraceSourceBlocks;
+                            size_t lo=0,hi=blocks.size();
+                            while(hi-lo>1){const size_t mid=(lo+hi)/2;if(blocks[mid].offset<=offset)lo=mid;else hi=mid;}
+                            const auto& block=blocks[lo];
                             if(offset>=block.offset && offset-block.offset<block.bytes &&
                                 totalBytes<=block.bytes-(offset-block.offset))
-                            {source=block.source+uint32_t(offset-block.offset);break;}
+                                source=block.source+uint32_t(offset-block.offset);
                         }
                     }
                     if (auto observe=g_magatamaRenderUnpackObserver) observe(source,cmd,vuAddr,srcBase,totalBytes);

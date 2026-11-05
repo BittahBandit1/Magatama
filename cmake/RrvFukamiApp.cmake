@@ -23,7 +23,17 @@ if(TARGET rrv-product)
     target_sources(rrv-product PRIVATE "${CMAKE_SOURCE_DIR}/src/app/fukami_app_common.cpp")
     # The startup hook must be an object of the executable itself: an
     # otherwise unreferenced constructor in a static library is not linked.
-    if(APPLE)
+    if(IOS)
+        # Magatama iOS: the app entry (UIKit through SDL) and the iPhone file layout.
+        enable_language(OBJCXX)
+        target_sources(rrv-product PRIVATE "${CMAKE_SOURCE_DIR}/src/app/magatama_ios.mm")
+        set_source_files_properties("${CMAKE_SOURCE_DIR}/src/app/magatama_ios.mm" PROPERTIES
+            COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(rrv-product PRIVATE rrv_fukami_settings "-framework UIKit" "-framework Foundation")
+        if(TARGET rrv-disc-extract)
+            target_link_libraries(rrv-product PRIVATE rrv-disc-extract)
+        endif()
+    elseif(APPLE)
         target_sources(rrv-product PRIVATE "${CMAKE_SOURCE_DIR}/src/app/fukami_app.mm")
         set_source_files_properties("${CMAKE_SOURCE_DIR}/src/app/fukami_app.mm" PROPERTIES
             COMPILE_OPTIONS "-fobjc-arc")
@@ -56,6 +66,13 @@ if(TARGET rrv-product)
         # The manifest is a resource of fukami.rc (UTF-8 code page, long paths, DPI); the linker must not add its own.
         target_link_options(rrv-product PRIVATE "/ENTRY:mainCRTStartup" "/MANIFEST:NO")
         target_link_libraries(rrv-product PRIVATE rrv_fukami_app_win rrv_fukami_settings rrv-disc-extract)
+    elseif(ANDROID)
+        # Magatama Android: SDL_main in libmain.so (SDL's Java activity loads it), the APK file layout.
+        target_sources(rrv-product PRIVATE "${CMAKE_SOURCE_DIR}/src/app/magatama_android.cpp")
+        target_link_libraries(rrv-product PRIVATE rrv_fukami_settings android log)
+        if(TARGET rrv-disc-extract)
+            target_link_libraries(rrv-product PRIVATE rrv-disc-extract)
+        endif()
     else()
         # Linux / Steam Deck (Gate 5): the same hook without AppKit
         # (Fukami/bin/Fukami layout, XDG data folder, zenity/kdialog dialogs).

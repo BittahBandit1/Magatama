@@ -953,7 +953,16 @@ private:
 #endif
 } // namespace
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(__ANDROID__)
+// iOS: src/app/magatama_ios.mm owns main() (UIKit through SDL_UIKitRunApp) and calls this.
+// Android: src/app/magatama_android.cpp's SDL_main (run by SDL's Java activity) calls this.
+int magatama_game_main(int argc, char **argv)
+#else
 int main(int argc, char **argv)
+#endif
 {
     // Windows has no constructor hook before main(); the app launcher (fukami_app_win.cpp) starts here. A no-op on
     // macOS and Linux, whose hooks have already run.
@@ -1026,9 +1035,13 @@ int main(int argc, char **argv)
             if (!std::getenv(name.c_str())) setDisplayEnv(name.c_str(),value);
         // Saved rendering.frame_rate arrives above as MAGATAMA_INTERPOLATE
         // (an explicit environment value wins). Interpolation was validated with original-source presentation.
+        // Original-frame presentation needs direct Metal; elsewhere (Vulkan on
+        // Linux) every field is presented already, which is what 60 needs.
+#if defined(__APPLE__)
         if (const char* rate = std::getenv("MAGATAMA_INTERPOLATE"); rate && std::strcmp(rate, "60") == 0 &&
             !std::getenv("MAGATAMA_ORIGINAL_PRESENT"))
             setDisplayEnv("MAGATAMA_ORIGINAL_PRESENT", "1");
+#endif
         if (!std::getenv("RRV_GS_RENDER_MODE")) setDisplayEnv("RRV_GS_RENDER_MODE","full");
         if (!std::getenv("RRV_PCSX2_GS_FXAA")) setDisplayEnv("RRV_PCSX2_GS_FXAA","1");
         if (!std::getenv("MTL_HUD_ENABLED")) setDisplayEnv("MTL_HUD_ENABLED","1");

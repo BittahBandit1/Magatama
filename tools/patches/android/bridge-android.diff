@@ -1,0 +1,188 @@
+diff -ru a/bridge.cpp b/bridge.cpp
+--- a/bridge.cpp	2026-11-04 16:12:09.920875358 -0600
++++ b/bridge.cpp	2026-11-04 22:20:58.455769361 -0600
+@@ -286,8 +286,14 @@
+     // environment, bundle, and default-library fallbacks would sever that
+     // source-derived authority.
+     const std::string bridge_directory = GetBridgeDirectory();
+-    const std::string staged_resources = bridge_directory.empty() ? std::string{} :
++    std::string staged_resources = bridge_directory.empty() ? std::string{} :
+         Path::Combine(bridge_directory, "resources");
++#if defined(__ANDROID__)
++    // Android: the bridge is an APK native library (that folder holds only .so files); the launcher extracts the
++    // package, resources included, to $MAGATAMA_ANDROID_GAME/package (src/app/magatama_android.cpp).
++    if (const char* game = std::getenv("MAGATAMA_ANDROID_GAME"); game && *game)
++        staged_resources = Path::Combine(game, "package/resources");
++#endif
+     if (!staged_resources.empty() && FileSystem::DirectoryExists(staged_resources.c_str()))
+         EmuFolders::Resources = Path::Canonicalize(staged_resources);
+     else
+@@ -316,6 +322,10 @@
+ 
+     Host::Internal::SetBaseSettingsLayer(&settings);
+     VMManager::SetDefaultSettings(settings, true, true, true, true, true);
++    // RRV_PCSX2_GS_CONSOLE=1: keep PCSX2's console (its own errors, e.g. why a Vulkan device was refused) on stdout/
++    // stderr; PCSX2's default turns it off as soon as the settings load.
++    if (const char* console = std::getenv("RRV_PCSX2_GS_CONSOLE"); console && std::strcmp(console, "1") == 0)
++        settings.SetBoolValue("Logging", "EnableSystemConsole", true);
+     VMManager::Internal::LoadStartupSettings();
+ 
+     const std::string roboto_path =
+@@ -1221,7 +1231,8 @@
+     if (direct_requested && (!config ||
+         config->surface.struct_size < sizeof(RrvPcsx2GsBridgeSurface) ||
+         (config->surface.kind != RRV_PCSX2_GS_SURFACE_LINUX_X11 &&
+-         config->surface.kind != RRV_PCSX2_GS_SURFACE_LINUX_WAYLAND) ||
++         config->surface.kind != RRV_PCSX2_GS_SURFACE_LINUX_WAYLAND &&
++         config->surface.kind != RRV_PCSX2_GS_SURFACE_ANDROID) ||
+         (config->surface.flags & RRV_PCSX2_GS_SURFACE_FLAG_CALLER_OWNS_HANDLES) == 0u ||
+         !config->surface.native_view || !config->surface.native_layer ||
+         config->surface.width_pixels == 0u || config->surface.height_pixels == 0u ||
+@@ -3492,9 +3503,94 @@
+ }
+ 
+ // Runs the host overlay, if one is registered, inside the open ImGui frame.
++// Performance overlay (RRV_PCSX2_GS_PERF_OSD=1; the Android launcher turns it on, like the Metal HUD on Apple):
++// presents per second, frame time (average and worst over the last half second), the game's own frame rate when
++// PCSX2 can tell it, GPU time per frame, and a graph of the last 120 frame times. Drawn on top of the picture
++// and the menu, top-left. Its clock is the host present cadence: this runs once per presented field.
++void DrawPerfOsd()
++{
++    static const bool enabled = [] {
++        const char* value = std::getenv("RRV_PCSX2_GS_PERF_OSD");
++        return value && std::strcmp(value, "1") == 0;
++    }();
++    if (!enabled || !ImGui::GetCurrentContext())
++        return;
++    using Clock = std::chrono::steady_clock;
++    constexpr int kHistory = 120;
++    static float history[kHistory] = {};
++    static int head = 0;
++    static Clock::time_point last{}, window_start{};
++    static int window_frames = 0;
++    static float window_max = 0.0f, window_sum = 0.0f;
++    static float fps = 0.0f, avg_ms = 0.0f, max_ms = 0.0f;
++    const Clock::time_point now = Clock::now();
++    if (last != Clock::time_point{})
++    {
++        const float ms = std::chrono::duration<float, std::milli>(now - last).count();
++        history[head] = ms;
++        head = (head + 1) % kHistory;
++        window_sum += ms;
++        window_max = std::max(window_max, ms);
++        ++window_frames;
++    }
++    else
++        window_start = now;
++    last = now;
++    const float window_s = std::chrono::duration<float>(now - window_start).count();
++    if (window_s >= 0.5f && window_frames > 0)
++    {
++        fps = window_frames / window_s;
++        avg_ms = window_sum / window_frames;
++        max_ms = window_max;
++        window_start = now;
++        window_frames = 0;
++        window_sum = window_max = 0.0f;
++    }
++    char line1[96], line2[96];
++    std::snprintf(line1, sizeof line1, "%.1f FPS  %.1f ms (max %.1f)", fps, avg_ms, max_ms);
++    const float game_fps = PerformanceMetrics::GetInternalFPS();
++    const float gpu_ms = PerformanceMetrics::GetGPUAverageTime();
++    if (game_fps > 0.0f)
++        std::snprintf(line2, sizeof line2, "Game %.1f FPS  GPU %.1f ms", game_fps, gpu_ms);
++    else
++        std::snprintf(line2, sizeof line2, "GPU %.1f ms", gpu_ms);
++
++    const float scale = OverlayScale();
++    ImFont* font = ImGuiManager::GetStandardFont();
++    const float size = std::ceil(13.0f * scale);
++    const float pad = 5.0f * scale;
++    const ImVec2 t1 = font->CalcTextSizeA(size, FLT_MAX, 0.0f, line1);
++    const ImVec2 t2 = font->CalcTextSizeA(size, FLT_MAX, 0.0f, line2);
++    const float graph_w = std::max(std::max(t1.x, t2.x), 150.0f * scale), graph_h = 34.0f * scale;
++    const ImVec2 at(10.0f * scale, 10.0f * scale);
++    const ImVec2 end(at.x + graph_w + 2 * pad, at.y + t1.y + t2.y + graph_h + 4 * pad);
++    ImDrawList* draw = ImGui::GetForegroundDrawList();
++    draw->AddRectFilled(at, end, IM_COL32(0, 0, 0, 160), 4.0f * scale);
++    const ImU32 text = max_ms > 34.0f ? IM_COL32(255, 120, 90, 255) : IM_COL32(120, 235, 130, 255);
++    draw->AddText(font, size, ImVec2(at.x + pad, at.y + pad), text, line1);
++    draw->AddText(font, size, ImVec2(at.x + pad, at.y + pad * 2 + t1.y), IM_COL32(220, 220, 220, 255), line2);
++    // Frame-time graph: 0 at the bottom; the scale fits 33.3 ms (a 30 FPS frame) or the worst sample, whichever is
++    // larger, with a faint line at 16.7 ms.
++    const ImVec2 g0(at.x + pad, at.y + t1.y + t2.y + pad * 3);
++    float top = 33.4f;
++    for (float v : history)
++        top = std::max(top, v);
++    const float y60 = g0.y + graph_h * (1.0f - 16.7f / top);
++    draw->AddLine(ImVec2(g0.x, y60), ImVec2(g0.x + graph_w, y60), IM_COL32(255, 255, 255, 50));
++    ImVec2 points[kHistory];
++    for (int i = 0; i < kHistory; ++i)
++    {
++        const float v = history[(head + i) % kHistory];
++        points[i] = ImVec2(g0.x + graph_w * i / (kHistory - 1), g0.y + graph_h * (1.0f - std::min(v, top) / top));
++    }
++    draw->AddPolyline(points, kHistory, IM_COL32(255, 210, 90, 255), 1.5f * scale);
++}
++
+ // Direct presentation only: the snapshot path presents nothing.
+ void RunHostOverlay()
+ {
++    if (ImGui::GetCurrentContext())
++        DrawPerfOsd();
+     if (!s_overlay_registered.load(std::memory_order_acquire))
+         return;
+     std::lock_guard<std::mutex> lock(s_overlay_mutex);
+diff -ru a/gsrunner_host.cpp b/gsrunner_host.cpp
+--- a/gsrunner_host.cpp	2026-11-04 16:12:09.921012321 -0600
++++ b/gsrunner_host.cpp	2026-11-04 16:12:09.937913329 -0600
+@@ -94,7 +94,8 @@
+     // stays null (it is a macOS-only CAMetalLayer slot).
+     const bool x11 = kind == RRV_PCSX2_GS_SURFACE_LINUX_X11;
+     const bool wayland = kind == RRV_PCSX2_GS_SURFACE_LINUX_WAYLAND;
+-    if ((!x11 && !wayland) || !native_view || !native_layer || width_pixels == 0u ||
++    const bool android = kind == RRV_PCSX2_GS_SURFACE_ANDROID;
++    if ((!x11 && !wayland && !android) || !native_view || !native_layer || width_pixels == 0u ||
+         height_pixels == 0u || backing_scale <= 0.0f)
+     {
+         if (error && error_capacity)
+@@ -106,6 +107,13 @@
+     info.type = x11 ? WindowInfo::Type::X11 : WindowInfo::Type::Wayland;
+     info.display_connection = native_view;
+     info.window_handle = native_layer;
++    if (android)
++    {
++        // Android: the ANativeWindow is the only handle (VKSwapChain's vkCreateAndroidSurfaceKHR).
++        info.type = WindowInfo::Type::Android;
++        info.display_connection = nullptr;
++        info.window_handle = native_view;
++    }
+ #endif
+     info.surface_width = width_pixels;
+     info.surface_height = height_pixels;
+diff -ru a/linux_surface_adapter.cpp b/linux_surface_adapter.cpp
+--- a/linux_surface_adapter.cpp	2026-11-04 16:12:09.920994830 -0600
++++ b/linux_surface_adapter.cpp	2026-11-04 16:12:09.937130928 -0600
+@@ -51,7 +51,8 @@
+         return 0;
+     }
+     if (surface->kind != RRV_PCSX2_GS_SURFACE_LINUX_X11 &&
+-        surface->kind != RRV_PCSX2_GS_SURFACE_LINUX_WAYLAND)
++        surface->kind != RRV_PCSX2_GS_SURFACE_LINUX_WAYLAND &&
++        surface->kind != RRV_PCSX2_GS_SURFACE_ANDROID)
+     {
+         SetError(error, error_capacity,
+                  "direct presentation surface kind %u is not X11 (%u) or Wayland (%u)",
+diff -ru a/rrv_pcsx2_gs_bridge.h b/rrv_pcsx2_gs_bridge.h
+--- a/rrv_pcsx2_gs_bridge.h	2026-11-04 16:12:09.921046058 -0600
++++ b/rrv_pcsx2_gs_bridge.h	2026-11-04 16:12:09.936386711 -0600
+@@ -57,6 +57,9 @@
+     // native_layer = HINSTANCE. Maps to PCSX2 WindowInfo (Win32 surface). A new
+     // enumerator only: no structure changed, so the ABI version stays 5.
+     RRV_PCSX2_GS_SURFACE_WIN32 = 4,
++    // Android: native_view and native_layer are both the ANativeWindow* (SDL's window surface), retained by the
++    // caller (ANativeWindow_acquire) for the bridge lifetime. PCSX2's Vulkan device makes a VkSurfaceKHR from it.
++    RRV_PCSX2_GS_SURFACE_ANDROID = 5,
+     // The SDL platform shell retains both handles from create through destroy.
+     // The bridge borrows them and never transfers or exposes their ownership.
+     RRV_PCSX2_GS_SURFACE_FLAG_CALLER_OWNS_HANDLES = 1u << 0,

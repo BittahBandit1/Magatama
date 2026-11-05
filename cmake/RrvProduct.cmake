@@ -18,7 +18,28 @@ if(NOT RRV_SDL_VERSION STREQUAL "2.32.10" OR
     message(FATAL_ERROR "SDL lock must pin release-2.32.10 commit 5d249570393f7a37e037abf22cd6012a4cc56a71")
 endif()
 
-if(APPLE)
+if(ANDROID)
+    # Magatama Android: libSDL2.so is sdl2-compat 2.32.x over SDL3 (the one SDL in the APK; its Java activity is
+    # SDL3's), from the Android dependency prefix (tools/android/build-deps.sh). The SDL2 API is the same.
+    set(RRV_SDL_ARCH "arm64")
+    set(MAGATAMA_ANDROID_DEPS "" CACHE PATH "Android dependency prefix (tools/android/build-deps.sh)")
+    set(RRV_SDL_PREFIX "${MAGATAMA_ANDROID_DEPS}")
+    add_library(SDL2::SDL2 SHARED IMPORTED)
+    set_target_properties(SDL2::SDL2 PROPERTIES
+        IMPORTED_LOCATION "${MAGATAMA_ANDROID_DEPS}/lib/libSDL2.so"
+        IMPORTED_NO_SONAME TRUE
+        INTERFACE_INCLUDE_DIRECTORIES "${MAGATAMA_ANDROID_DEPS}/include/SDL2")
+elseif(IOS)
+    # Magatama iOS: static SDL 2.32.10 from the iOS dependency prefix (scripts/magatama_build_ios.sh).
+    set(RRV_SDL_ARCH "arm64")
+    set(MAGATAMA_IOS_DEPS "" CACHE PATH "iOS dependency prefix (build/ios/deps)")
+    set(RRV_SDL_PREFIX "${MAGATAMA_IOS_DEPS}")
+    add_library(SDL2::SDL2 STATIC IMPORTED)
+    set_target_properties(SDL2::SDL2 PROPERTIES
+        IMPORTED_LOCATION "${MAGATAMA_IOS_DEPS}/lib/libSDL2.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${MAGATAMA_IOS_DEPS}/include/SDL2"
+        INTERFACE_LINK_LIBRARIES "-framework AVFoundation;-framework AudioToolbox;-framework CoreAudio;-framework CoreGraphics;-framework CoreHaptics;-framework CoreMotion;-framework CoreBluetooth;-framework Foundation;-framework GameController;-framework Metal;-framework QuartzCore;-framework UIKit;-framework OpenGLES;-framework CoreFoundation;-framework IOKit;-liconv")
+elseif(APPLE)
     # SDL is installed once outside disposable product build trees. Configure is
     # deliberately offline and fails closed unless its pin and installed hashes match.
     if(CMAKE_OSX_ARCHITECTURES)

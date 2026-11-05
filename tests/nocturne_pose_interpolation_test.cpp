@@ -13,6 +13,9 @@ int main(){pose::Interpolator e;e.configure();endpoint(e,10,0);auto c=packet('C'
  auto corrupt=p.data;corrupt[0]^=1;CHECK(!e.unpack(p.packet,0x6c07c000,corrupt.data(),112,out));CHECK(!e.unpack(p.packet,0x6c06c000,p.data.data(),112,out));
  // One-skin bones carry their VU address in the UNPACK command and still blend.
  endpoint(e,14,0);c=packet('C',16,10);p=packet('P',16,10);e.publish(c);e.publish(p);e.begin(start(16,0));CHECK(e.unpack(c.packet,0x6c0bc000,c.data.data(),176,out));CHECK(e.unpack(p.packet,0x6c07c008,p.data.data(),112,out));
+ // A model whose skinned body stays at its endpoint keeps its rigid parts there.
+ endpoint(e,17,0);c=packet('C',19,10);p=packet('P',19,10);e.publish(c);e.publish(p);e.begin(start(19,0));
+ e.rootHeldBack=[](uint32_t root){return root==0x4000;};CHECK(e.unpack(c.packet,0x6c0bc000,c.data.data(),176,out));CHECK(!e.unpack(p.packet,0x6c07c000,p.data.data(),112,out));e.rootHeldBack=nullptr;
  // A camera teleport disables model interpolation for that draw.
  endpoint(e,20,0);c=packet('C',22,1000);p=packet('P',22,10);e.publish(c);e.publish(p);e.begin(start(22,0));CHECK(!e.unpack(c.packet,0x6c0bc000,c.data.data(),176,out));CHECK(!e.unpack(p.packet,0x6c07c000,p.data.data(),112,out));
  // Object identity changes and frees cannot reuse previous pose history.

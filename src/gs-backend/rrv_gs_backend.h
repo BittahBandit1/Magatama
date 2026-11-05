@@ -47,6 +47,8 @@ namespace rrv::gsbackend
         LinuxWayland = 3u,
         // Windows: nativeView = HWND, nativeLayer = HINSTANCE (SDL_SYSWM_WINDOWS).
         Win32 = 4u,
+        // Android: nativeView = nativeLayer = the ANativeWindow* (SDL_SYSWM_ANDROID).
+        Android = 5u,
     };
 
     // Portable native-surface description. Handles are opaque and borrowed:

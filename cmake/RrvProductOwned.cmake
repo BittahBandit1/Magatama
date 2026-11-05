@@ -25,7 +25,18 @@ target_include_directories(rrv-product BEFORE PRIVATE "${RRV_GENERATED_SOURCE_DI
 target_include_directories(rrv-product PRIVATE "${RRV_GENERATED_INCLUDE_DIR}/native")
 
 get_target_property(_rrv_product_sources rrv-product SOURCES)
+if(ANDROID)
+    # Magatama Android: the game is libmain.so, which SDL's Java activity loads and enters through SDL_main
+    # (src/app/magatama_android.cpp); scripts/magatama_build_android.sh packs it into the APK.
+    add_library(Fukami SHARED ${_rrv_product_sources})
+    set_target_properties(Fukami PROPERTIES OUTPUT_NAME main
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/candidate-bin")
+else()
 add_executable(Fukami ${_rrv_product_sources})
+endif()
+if(ANDROID)
+    set(MAGATAMA_ANDROID_BUILD "0" CACHE STRING "Android build number (versionCode, shown in the log)")
+endif()
 foreach(_property IN ITEMS INCLUDE_DIRECTORIES COMPILE_DEFINITIONS
         COMPILE_OPTIONS LINK_LIBRARIES LINK_OPTIONS)
     get_target_property(_value rrv-product ${_property})
@@ -35,6 +46,24 @@ foreach(_property IN ITEMS INCLUDE_DIRECTORIES COMPILE_DEFINITIONS
 endforeach()
 set_target_properties(Fukami PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/candidate-bin")
+if(ANDROID)
+    target_compile_definitions(Fukami PRIVATE "MAGATAMA_ANDROID_BUILD=\"${MAGATAMA_ANDROID_BUILD}\"")
+    # The NDK's libc++ (r28) keeps std::jthread/std::stop_token behind its experimental switch (main_product.cpp).
+    target_compile_options(Fukami PRIVATE -fexperimental-library)
+    target_link_libraries(Fukami PRIVATE c++experimental)
+endif()
+if(IOS)
+    set(MAGATAMA_IOS_MIN_OS "16.0" CACHE STRING "Info.plist MinimumOSVersion")
+    set(MAGATAMA_IOS_BUILD "0" CACHE STRING "iOS build number (CFBundleVersion)")
+    if(MAGATAMA_IOS_LEGACY)
+        target_compile_definitions(Fukami PRIVATE MAGATAMA_IOS_LEGACY=1)
+    endif()
+    # Magatama iOS: an app bundle (candidate-bin/Magatama.app); scripts/magatama_build_ios.sh adds the package.
+    set_target_properties(Fukami PROPERTIES
+        MACOSX_BUNDLE TRUE
+        OUTPUT_NAME Magatama
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/cmake/ios/Info.plist.in")
+endif()
 if(WIN32)
     # The GUI subsystem is a target property, not one of the copied lists above (cmake/RrvFukamiApp.cmake sets it).
     get_target_property(_rrv_product_gui rrv-product WIN32_EXECUTABLE)

@@ -1,0 +1,40 @@
+diff --git a/metal_surface_adapter.mm b/metal_surface_adapter.mm
+index 77c2b85..9ff5c01 100644
+--- a/metal_surface_adapter.mm
++++ b/metal_surface_adapter.mm
+@@ -5,7 +5,14 @@
+ // SDL-created view/layer as opaque handles and retain them through bridge
+ // destruction. This adapter creates no application, window, or view.
+ 
++#include <TargetConditionals.h>
++#if TARGET_OS_OSX
+ #import <AppKit/AppKit.h>
++using RrvSurfaceView = NSView;
++#else
++#import <UIKit/UIKit.h> // iOS: the SDL UIView whose backing layer is the CAMetalLayer
++using RrvSurfaceView = UIView;
++#endif
+ #import <QuartzCore/CAMetalLayer.h>
+ 
+ #include "rrv_pcsx2_gs_bridge.h"
+@@ -41,9 +48,9 @@ extern "C" int rrv_pcsx2_gs_bridge_validate_macos_surface(
+     {
+         id view = (__bridge id)native_view;
+         id layer = (__bridge id)native_layer;
+-        if (!view || ![view isKindOfClass:[NSView class]])
++        if (!view || ![view isKindOfClass:[RrvSurfaceView class]])
+         {
+-            SetError(error, error_capacity, "direct presentation native_view is not an NSView");
++            SetError(error, error_capacity, "direct presentation native_view is not the platform view (NSView/UIView)");
+             return 0;
+         }
+         if (!layer || ![layer isKindOfClass:[CAMetalLayer class]])
+@@ -80,7 +87,7 @@ extern "C" int rrv_pcsx2_gs_bridge_prepare_owner_surface(
+         if (!rrv_pcsx2_gs_bridge_validate_macos_surface(
+                 surface->native_view, surface->native_layer, error, error_capacity))
+             return 0;
+-        NSView* view = (__bridge NSView*)surface->native_view;
++        RrvSurfaceView* view = (__bridge RrvSurfaceView*)surface->native_view;
+         if ([view layer] != (__bridge CAMetalLayer*)surface->native_layer)
+         {
+             SetError(error, error_capacity, "GS owner surface layer is not attached to the SDL view");

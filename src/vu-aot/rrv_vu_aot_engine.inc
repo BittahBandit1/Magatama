@@ -379,6 +379,11 @@ bool VU1Interpreter::aotRun(const uint8_t *vuCode, uint32_t codeSize, uint32_t m
 {
     uint32_t executed = 0;
     m_aotCodeSize = codeSize;
+    // aotLookup's validated-block fast path, inline: nothing writes micro memory while a program runs (the
+    // generation is read once), and a block is short, so the call per block was a visible share of rrv-vu1
+    // (Nova profile: 8%).
+    const uint32_t gen = g_rrvVuCodeGen[m_isVu0 ? 0 : 1].load(std::memory_order_relaxed);
+    const bool genCheck = m_aotGenCheck;
     while (executed < maxCycles)
     {
         // Entry states a block is not built for: a pending branch (this slot
@@ -388,7 +393,9 @@ bool VU1Interpreter::aotRun(const uint8_t *vuCode, uint32_t codeSize, uint32_t m
         const uint32_t pc = m_state.pc;
         if ((pc & 7u) != 0u || pc + 8u > codeSize || (pc >> 3) >= kIrSlots)
             break;
-        const AotBlock *b = aotLookup(pc, vuCode, codeSize);
+        const AotBlock *b = m_aotByPc[pc >> 3];
+        if (!b || genCheck || m_aotByPcGen[pc >> 3] != gen || pc + b->slots * 8u > codeSize)
+            b = aotLookup(pc, vuCode, codeSize);
         if (!b || executed + b->slots > maxCycles)
             break;
         b->fn(*this, pc);

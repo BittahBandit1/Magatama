@@ -415,10 +415,18 @@ index 280d67797..e72efefd0 100644
  	{
  		fprintf(stderr, "Failed to open %s due to %s\n", file_name, strerror(errno));
 diff --git a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
-index 8bf81e6d4..5a9cb6943 100644
+index 8bf81e6d4..ba9384272 100644
 --- a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
 +++ b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
-@@ -198,6 +198,10 @@ bool GSDeviceVK::SelectInstanceExtensions(ExtensionList* extension_list, const W
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+ // SPDX-License-Identifier: GPL-3.0+
+ 
++#include <atomic>
+ #include "GS/GS.h"
+ #include "GS/GSGL.h"
+ #include "GS/GSPerfMon.h"
+@@ -198,6 +199,10 @@ bool GSDeviceVK::SelectInstanceExtensions(ExtensionList* extension_list, const W
  	if (wi.type == WindowInfo::Type::MacOS && !SupportsExtension(VK_EXT_METAL_SURFACE_EXTENSION_NAME, true))
  		return false;
  #endif
@@ -429,8 +437,199 @@ index 8bf81e6d4..5a9cb6943 100644
  
  	// VK_EXT_debug_utils
  	if (enable_debug_utils && !SupportsExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, false))
+@@ -417,6 +422,10 @@ bool GSDeviceVK::SelectDeviceExtensions(ExtensionList* extension_list, bool enab
+ 		SupportsExtension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME, false);
+ 	m_optional_extensions.vk_ext_line_rasterization = SupportsExtension(VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME, false);
+ 	m_optional_extensions.vk_khr_driver_properties = SupportsExtension(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME, false);
++#ifdef __ANDROID__
++	m_optional_extensions.vk_google_display_timing =
++		enable_surface && SupportsExtension(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME, false);
++#endif
+ 
+ 	if (m_optional_extensions.vk_swapchain_maintenance1)
+ 	{
+@@ -849,6 +858,8 @@ bool GSDeviceVK::ProcessDeviceExtensions()
+ 		m_optional_extensions.vk_ext_full_screen_exclusive ? "supported" : "NOT supported");
+ 	Console.WriteLn("VK_KHR_driver_properties is %s",
+ 		m_optional_extensions.vk_khr_driver_properties ? "supported" : "NOT supported");
++	Console.WriteLn("VK_GOOGLE_display_timing is %s",
++		m_optional_extensions.vk_google_display_timing ? "supported" : "NOT supported");
+ 	Console.WriteLn("VK_EXT_attachment_feedback_loop_layout is %s",
+ 		m_optional_extensions.vk_ext_attachment_feedback_loop_layout ? "supported" : "NOT supported");
+ 	Console.WriteLn("VK_EXT_fragment_shader_interlock is %s",
+@@ -1217,6 +1228,132 @@ void GSDeviceVK::WaitForCommandBufferCompletion(u32 index)
+ // Only the GS thread submits, so no synchronisation is needed.
+ static bool s_rrv_present_accepted = false;
+ 
++#ifdef __ANDROID__
++// RRV Android present pacing. Android screens often run at 120 Hz, where FIFO alone shows 59.94 FPS frames for 1 and
++// 3 refreshes alternately (measured on a Retroid Pocket Nova: of 125 frames only 9-27 got the 2 refreshes each should
++// get). VK_GOOGLE_display_timing (implemented by Android's Vulkan loader) lets each present carry the earliest time it
++// may be shown: the targets advance by a whole number of refresh cycles per frame (2 at 120 Hz, 1 at 60 Hz), locked to
++// real vsync times reported back by vkGetPastPresentationTimingGOOGLE. A frame that arrives too late for its target
++// re-anchors on the next reachable vsync (one longer frame instead of a run of uneven ones).
++// RRV_PCSX2_GS_PRESENT_PACING=0 turns it off; every ~2 s the log gets the measured on-screen frame lengths.
++// On-screen frame lengths as the display reported them (actualPresentTime deltas, ms), newest at
++// g_rrv_display_frames - 1: the bridge's performance overlay draws these, not the host's present calls.
++std::atomic<u64> g_rrv_display_frames{0};
++float g_rrv_display_ms[128];
++static u64 RrvMonotonicNs()
++{
++	timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return static_cast<u64>(ts.tv_sec) * 1000000000ull + static_cast<u64>(ts.tv_nsec);
++}
++
++bool GSDeviceVK::RrvAndroidPacePresent(VkSwapchainKHR swap_chain, VkPresentTimeGOOGLE& time)
++{
++	struct State
++	{
++		VkSwapchainKHR swap_chain = VK_NULL_HANDLE;
++		u64 refresh = 0;      // ns per display refresh
++		u32 cycles = 0;       // refreshes per frame (0: pacing off for this display)
++		u32 next_id = 1;
++		u64 target = 0;       // vsync time the last present was aimed at
++		u64 anchor = 0;       // a real vsync time (latest actualPresentTime)
++		u64 last_actual = 0;
++		u64 hist[5] = {};     // measured on-screen length in refreshes: 1, 2, 3, 4, 5+
++		u64 late = 0, reanchors = 0, presents = 0;
++		u64 log_at = 0;
++	};
++	static State st;
++	static const bool enabled = [] {
++		const char* value = std::getenv("RRV_PCSX2_GS_PRESENT_PACING");
++		return !(value && value[0] == '0');
++	}();
++	if (!enabled || !vkGetRefreshCycleDurationGOOGLE || !vkGetPastPresentationTimingGOOGLE)
++		return false;
++	if (st.swap_chain != swap_chain)
++	{
++		// New swap chain (start, resize): ask its refresh rate again and start a fresh grid.
++		st = State{};
++		st.swap_chain = swap_chain;
++		VkRefreshCycleDurationGOOGLE cycle{};
++		if (vkGetRefreshCycleDurationGOOGLE(m_device, swap_chain, &cycle) != VK_SUCCESS || cycle.refreshDuration == 0)
++			return false;
++		st.refresh = cycle.refreshDuration;
++		constexpr double frame_ns = 1e9 * 1001.0 / 60000.0;
++		const u32 cycles = static_cast<u32>(std::lround(frame_ns / static_cast<double>(st.refresh)));
++		const double error = std::abs(cycles * static_cast<double>(st.refresh) - frame_ns) / frame_ns;
++		st.cycles = (cycles >= 1 && error < 0.05) ? cycles : 0;
++		std::fprintf(stderr, "[vk-pacing] display refresh %.2f Hz: %s\n", 1e9 / static_cast<double>(st.refresh),
++			st.cycles ? (st.cycles == 1 ? "1 refresh per frame" : "2+ refreshes per frame") : "no even cadence, pacing off");
++	}
++	if (st.cycles == 0)
++		return false;
++
++	// What the display actually did with earlier frames: the vsync grid, and the on-screen length of each frame.
++	u32 count = 0;
++	if (vkGetPastPresentationTimingGOOGLE(m_device, swap_chain, &count, nullptr) == VK_SUCCESS && count)
++	{
++		VkPastPresentationTimingGOOGLE past[16];
++		count = std::min<u32>(count, 16);
++		if (vkGetPastPresentationTimingGOOGLE(m_device, swap_chain, &count, past) >= VK_SUCCESS)
++			for (u32 i = 0; i < count; ++i)
++			{
++				const u64 actual = past[i].actualPresentTime;
++				if (!actual)
++					continue;
++				if (st.last_actual && actual > st.last_actual)
++				{
++					const u64 n = (actual - st.last_actual + st.refresh / 2) / st.refresh;
++					st.hist[std::min<u64>(n ? n : 1, 5) - 1]++;
++					const u64 index = g_rrv_display_frames.load(std::memory_order_relaxed);
++					g_rrv_display_ms[index % 128] = static_cast<float>(actual - st.last_actual) * 1e-6f;
++					g_rrv_display_frames.store(index + 1, std::memory_order_release);
++				}
++				st.last_actual = actual;
++				st.anchor = actual;
++			}
++	}
++
++	const u64 now = RrvMonotonicNs();
++	// Android composes a frame some time before its vsync (about 11 ms here): aim at a vsync at least this far ahead.
++	// RRV_PCSX2_GS_PRESENT_LEAD_MS raises the floor (more slack for a late present, more latency).
++	static const u64 lead_floor = [] {
++		const char* value = std::getenv("RRV_PCSX2_GS_PRESENT_LEAD_MS");
++		const long ms = value ? std::strtol(value, nullptr, 10) : 0;
++		return (ms >= 8 && ms <= 50 ? static_cast<u64>(ms) : 12ull) * 1000000ull;
++	}();
++	const u64 lead = std::max<u64>(st.refresh + st.refresh / 2, lead_floor);
++	u64 target = st.target ? st.target + st.cycles * st.refresh : 0;
++	if (!target || target < now + lead || target > now + lead + 3 * st.cycles * st.refresh)
++	{
++		if (st.target)
++			(target && target < now + lead) ? ++st.late : ++st.reanchors;
++		// The first vsync of the real grid that is far enough ahead.
++		const u64 earliest = now + lead;
++		target = st.anchor ? st.anchor + ((earliest - st.anchor + st.refresh - 1) / st.refresh) * st.refresh : earliest;
++	}
++	st.target = target;
++	time.presentID = st.next_id++;
++	// Just before the vsync, so the image is shown on that vsync and not the next.
++	time.desiredPresentTime = target - st.refresh / 4;
++	st.presents++;
++
++	if (now >= st.log_at)
++	{
++		if (st.log_at)
++			std::fprintf(stderr,
++				"[vk-pacing] presents=%llu on-screen refreshes 1:%llu 2:%llu 3:%llu 4:%llu 5+:%llu late=%llu reanchor=%llu\n",
++				static_cast<unsigned long long>(st.presents), static_cast<unsigned long long>(st.hist[0]),
++				static_cast<unsigned long long>(st.hist[1]), static_cast<unsigned long long>(st.hist[2]),
++				static_cast<unsigned long long>(st.hist[3]), static_cast<unsigned long long>(st.hist[4]),
++				static_cast<unsigned long long>(st.late), static_cast<unsigned long long>(st.reanchors));
++		st.log_at = now + 2000000000ull;
++		st.presents = st.late = st.reanchors = 0;
++		std::fill(std::begin(st.hist), std::end(st.hist), 0);
++	}
++	return true;
++}
++#endif
++
+ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
+ {
+ 	s_rrv_present_accepted = false;
+@@ -1344,7 +1481,15 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
+ 
+ 	if (present_swap_chain)
+ 	{
++#ifdef __ANDROID__
++		VkPresentTimeGOOGLE rrv_present_time{};
++		VkPresentTimesInfoGOOGLE rrv_present_times{VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, nullptr, 1, &rrv_present_time};
++		const bool rrv_paced = m_optional_extensions.vk_google_display_timing &&
++			RrvAndroidPacePresent(present_swap_chain->GetSwapChain(), rrv_present_time);
++		const VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, rrv_paced ? &rrv_present_times : nullptr, 1,
++#else
+ 		const VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, nullptr, 1,
++#endif
+ 			present_swap_chain->GetRenderingFinishedSemaphorePtr(), 1, present_swap_chain->GetSwapChainPtr(),
+ 			present_swap_chain->GetCurrentImageIndexPtr(), nullptr};
+ 
+diff --git a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.h b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.h
+index c26dd76db..cae2837e8 100644
+--- a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.h
++++ b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.h
+@@ -47,6 +47,7 @@ public:
+ 		bool vk_khr_shader_non_semantic_info : 1;
+ 		bool vk_ext_attachment_feedback_loop_layout : 1;
+ 		bool vk_ext_fragment_shader_interlock : 1;
++		bool vk_google_display_timing : 1; // RRV Android present pacing
+ 	};
+ 
+ 	// Global state accessors
+@@ -144,6 +145,9 @@ private:
+ 	void DisableDebugUtils();
+ 
+ 	void SubmitCommandBuffer(VKSwapChain* present_swap_chain);
++#ifdef __ANDROID__
++	bool RrvAndroidPacePresent(VkSwapchainKHR swap_chain, VkPresentTimeGOOGLE& time);
++#endif
+ 	void MoveToNextCommandBuffer();
+ 
+ 	enum class WaitType
 diff --git a/pcsx2/GS/Renderers/Vulkan/VKEntryPoints.inl b/pcsx2/GS/Renderers/Vulkan/VKEntryPoints.inl
-index b4c9f3652..7457ca4e2 100644
+index b4c9f3652..0ce43fbfe 100644
 --- a/pcsx2/GS/Renderers/Vulkan/VKEntryPoints.inl
 +++ b/pcsx2/GS/Renderers/Vulkan/VKEntryPoints.inl
 @@ -56,6 +56,10 @@ VULKAN_INSTANCE_ENTRY_POINT(vkCreateWaylandSurfaceKHR, false)
@@ -444,6 +643,18 @@ index b4c9f3652..7457ca4e2 100644
  // VK_EXT_debug_utils
  VULKAN_INSTANCE_ENTRY_POINT(vkCmdBeginDebugUtilsLabelEXT, false)
  VULKAN_INSTANCE_ENTRY_POINT(vkCmdEndDebugUtilsLabelEXT, false)
+@@ -216,6 +220,11 @@ VULKAN_DEVICE_ENTRY_POINT(vkDestroySwapchainKHR, false)
+ VULKAN_DEVICE_ENTRY_POINT(vkGetSwapchainImagesKHR, false)
+ VULKAN_DEVICE_ENTRY_POINT(vkAcquireNextImageKHR, false)
+ VULKAN_DEVICE_ENTRY_POINT(vkQueuePresentKHR, false)
++#if defined(VK_USE_PLATFORM_ANDROID_KHR)
++// RRV Android present pacing (VK_GOOGLE_display_timing, provided by Android's Vulkan loader).
++VULKAN_DEVICE_ENTRY_POINT(vkGetRefreshCycleDurationGOOGLE, false)
++VULKAN_DEVICE_ENTRY_POINT(vkGetPastPresentationTimingGOOGLE, false)
++#endif
+ 
+ // Vulkan 1.1 functions.
+ VULKAN_DEVICE_ENTRY_POINT(vkGetBufferMemoryRequirements2, true)
 diff --git a/pcsx2/GS/Renderers/Vulkan/VKLoader.h b/pcsx2/GS/Renderers/Vulkan/VKLoader.h
 index 65c11f8f3..75d0055fa 100644
 --- a/pcsx2/GS/Renderers/Vulkan/VKLoader.h

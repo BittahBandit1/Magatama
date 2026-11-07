@@ -206,6 +206,10 @@ struct Gate3RealtimePacerV1;
 std::atomic<bool> g_rrvFastForward{false};
 extern "C" void rrv_set_fast_forward(int on){g_rrvFastForward.store(on!=0,std::memory_order_relaxed);}
 extern "C" int rrv_fast_forward_active(void){return g_rrvFastForward.load(std::memory_order_relaxed)?1:0;}
+// Host performance hint (Android ADPF): called at every paced start with the host time the game spent since it was
+// last released (its work for the field, waits on the GS/VU pipeline included); the pacer's own sleep is not work.
+std::atomic<void(*)(long long)> g_rrvFieldWorkHook{nullptr};
+extern "C" void rrv_set_field_work_hook(void(*hook)(long long work_ns)){g_rrvFieldWorkHook.store(hook,std::memory_order_release);}
 Gate3RealtimePacerV1& gate3RealtimePacerV1();
 struct Gate3RealtimePacerV1 {
     using Clock=std::chrono::steady_clock;
@@ -225,6 +229,7 @@ struct Gate3RealtimePacerV1 {
     Clock::time_point anchor{};
     Clock::duration catchup{},spin{};
     uint64_t n=0,waits=0,late=0,reanchors=0;
+    Clock::time_point lastRelease{}; // when the last start was released to the game (g_rrvFieldWorkHook)
     // RRV_GATE3_FAST_FORWARD=N: the first N starts run unpaced, then pacing
     // anchors (replay debugging: reach a scene fast, then watch it live).
     uint64_t fastForward=0,starts=0;
@@ -298,6 +303,9 @@ struct Gate3RealtimePacerV1 {
             return;
         }
         const auto now=Clock::now();
+        struct Released{Clock::time_point& at;~Released(){at=Clock::now();}} released{lastRelease};
+        if(auto hook=g_rrvFieldWorkHook.load(std::memory_order_acquire);hook&&lastRelease!=Clock::time_point{})
+            hook(static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(now-lastRelease).count()));
         if(!anchored){anchored=true;anchor=now;n=0;if(held)anchor-=Lead();return;}
         const auto due=Deadline(++n);
         if(now<due){

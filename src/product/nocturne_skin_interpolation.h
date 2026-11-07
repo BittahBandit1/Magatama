@@ -25,6 +25,8 @@
 #include <unordered_map>
 #include <vector>
 
+uint64_t rrv_gate3_realtime_waits();
+
 namespace magatama::skin {
 
 struct Matrix128 { std::array<uint8_t,128> b{}; };
@@ -74,34 +76,50 @@ public:
     uint64_t generation() const{return gen_;}
 
     // Real-time budget for the halfway passes (host microseconds per built
-    // frame). The extra pass must never make the game fall behind: when a
+    // frame: the halfway pass plus its bookkeeping). The extra work must never make the game fall behind: when a
     // built frame takes longer than a 2-field frame, the budget shrinks;
     // while frames keep time it grows back. Decided per model per frame.
+    //
+    // Frames are whole fields: a built frame that runs even slightly past its 2 fields costs
+    // a third, so the budget admits a model only when its cost (measured on its previous
+    // frames) still fits, grows slowly while frames keep time and halves on a late frame.
     struct Budget {
         uint64_t gen=0; std::chrono::steady_clock::time_point start{};
-        double budgetUs=6000, spentUs=0; std::unordered_map<uint32_t,bool> allowed;
-        uint64_t skippedModels=0, frames=0, slowFrames=0;
+        double budgetUs=1000, spentUs=0, reservedUs=0; std::unordered_map<uint32_t,bool> allowed;
+        std::unordered_map<uint32_t,double> cost, frameCost; // per model root: smoothed us per frame; this frame's
+        uint64_t skippedModels=0, frames=0, slowFrames=0, waits=0;
     } budget;
     bool allow(uint32_t root){
         auto& b=budget;const auto now=std::chrono::steady_clock::now();
         if(b.gen!=gen_){
+            // Slack: the real-time pacer waited for a start during the frame (the game was
+            // ahead of real time). A frame with no wait ran flat out, at or behind real time:
+            // halve. Wall time between frames jitters by more than the margin, so it only
+            // excludes one-off hitches (loading, >100 ms).
+            const uint64_t waits=rrv_gate3_realtime_waits();
             if(b.gen&&b.gen+1==gen_){
                 const double frameUs=std::chrono::duration<double,std::micro>(now-b.start).count();
                 ++b.frames;
-                // 2 fields at 59.94 Hz = 33.37 ms; allow a little scheduling noise.
-                // A one-off hitch (loading, >100 ms) says nothing about this
-                // pass; an ordinary overrun takes the overrun back out of it.
-                if(frameUs>34500&&frameUs<100000){++b.slowFrames;b.budgetUs=std::max(0.0,std::min(b.budgetUs,b.spentUs)-(frameUs-33370)-500);}
-                else if(frameUs<=34500)b.budgetUs=std::min(20000.0,b.budgetUs+1000);
+                if(waits==b.waits&&frameUs<100000){++b.slowFrames;b.budgetUs=std::min(b.budgetUs,b.spentUs)*0.5;}
+                else if(waits!=b.waits)b.budgetUs=std::min(20000.0,b.budgetUs+250);
             }
-            b.gen=gen_;b.start=now;b.spentUs=0;b.allowed.clear();
+            b.waits=waits;
+            for(const auto& [r,us]:b.frameCost){auto i=b.cost.find(r);if(i==b.cost.end())b.cost.emplace(r,us);else i->second=.75*i->second+.25*us;}
+            if(b.cost.size()>4096)b.cost.clear();
+            b.frameCost.clear();
+            b.gen=gen_;b.start=now;b.spentUs=0;b.reservedUs=0;b.allowed.clear();
         }
         auto i=b.allowed.find(root);
-        if(i==b.allowed.end())i=b.allowed.emplace(root,b.spentUs<b.budgetUs).first;
+        if(i==b.allowed.end()){
+            auto c=b.cost.find(root);const double predicted=c==b.cost.end()?500.0:c->second;
+            const bool ok=std::max(b.spentUs,b.reservedUs)+predicted<=b.budgetUs;
+            if(ok)b.reservedUs=std::max(b.spentUs,b.reservedUs)+predicted;
+            i=b.allowed.emplace(root,ok).first;
+        }
         if(!i->second)++b.skippedModels;
         return i->second;
     }
-    void spent(double us){budget.spentUs+=us;}
+    void spent(uint32_t root,double us){budget.spentUs+=us;if(root&&budget.allowed.count(root)&&budget.allowed[root])budget.frameCost[root]+=us;}
 
     // Bone/node halfway TM (128 bytes, VU1 TM packet layout). False: no
     // usable history or a discontinuity (teleport, cut, large turn).
@@ -131,6 +149,10 @@ public:
         if(camCur_.valid&&camCur_.frame==frame&&camCur_.gen+1>=gen_){std::memcpy(camCur_.data.data(),view,176);return;}
         camPrev_=camCur_;camCur_.frame=frame;camCur_.gen=gen_;camCur_.valid=true;std::memcpy(camCur_.data.data(),view,176);
     }
+    // A model the budget skips this frame: keep its histories current (a copy,
+    // no decomposition) so it can blend again as soon as it is allowed.
+    void observeNode(uint32_t node,const uint8_t* now){if(!observe(nodes_[node],now,128))++rejected_;}
+    void observeScreen(uint32_t root,const uint8_t* now){observe(screens_[root],now,64);}
     void forgetNode(uint32_t node){nodes_.erase(node);++staleNodes_;}
     uint64_t staleNodes_=0;
     // Screen matrix (64 bytes) as used with one model root: halfway element

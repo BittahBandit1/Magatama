@@ -384,6 +384,9 @@ extern "C" __attribute__((visibility("default"))) int SDL_main(int, char **)
     def("RRV_PCSX2_GS_VSYNC", "1");
     def("RRV_GS_EXECUTION", "worker-sync");
     def("RRV_VU1GS_EXECUTION", "owner-async");
+    // MAGATAMA_PERF_HINT=1: ADPF clock hints for the game/VU1/GS threads (rrv_mac_qos.h). Off: no measurable gain on
+    // the Nova (60-step soak: same 98.7% of frames on time with and without).
+    def("RRV_VU1GS_SPLIT", "1"); // VU1 on its own thread: frees the GS owner (Oni spot: 107 -> 111 fields/2 s)
     def("RRV_FUKAMI_INI", (g_external / "magatama.ini").string());
     def("MAGATAMA_IPU", "1");
     def("MAGATAMA_IPU_WORKER_TIMING", "1");
@@ -391,6 +394,8 @@ extern "C" __attribute__((visibility("default"))) int SDL_main(int, char **)
     def("RRV_WINDOW_FULLSCREEN", "1");
     def("RRV_PCSX2_GS_FULL_SCALE", "2");
     def("RRV_PCSX2_GS_CONSOLE", "1"); // PCSX2's own messages in the log (Android bring-up)
+    def("MAGATAMA_PERF_CORES", "1"); // game/GS/VU threads on the performance cores (src/gs-backend/rrv_mac_qos.h)
+    def("RRV_PAD_MERGE_KEYBOARD", "1"); // keyboard keys (ADB, a Bluetooth keyboard) work beside the built-in controls
     def("RRV_PCSX2_GS_PERF_OSD", "1"); // FPS / frame-time overlay (the Metal HUD's role on Apple devices)
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     // Back button: the in-game menu (Escape), not "leave the app".

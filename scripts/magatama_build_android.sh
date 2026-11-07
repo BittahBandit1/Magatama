@@ -83,9 +83,13 @@ if run_from product; then
         build_no=$(( $(cat "$counter" 2>/dev/null || echo 0) + 1 )); echo "$build_no" > "$counter"
     fi
     echo "$build_no" > "$out/build-number"
+    # ARMv8.2 (Cortex-A75 / Snapdragon 845 and newer): inline LSE atomics instead of the outlined helpers the NDK's
+    # armv8.0 default calls (Nova profile: ~5% of the VU1 thread). MAGATAMA_ANDROID_MARCH= (empty) builds for armv8.0.
+    march="${MAGATAMA_ANDROID_MARCH--march=armv8.2-a}"
     cmake -S "$repo" -B "$product" "${TC[@]}" -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
         -DBUILD_TESTING=OFF -DRRV_BUILD_PRODUCT=ON -DRRV_PRODUCT_OWNED_SOURCE=ON -DRRV_GS_PRODUCER_CONTROL=ON \
         -DMAGATAMA_GAME=ON -DMAGATAMA_ANDROID_DEPS="$deps" -DMAGATAMA_ANDROID_BUILD="$build_no" \
+        -DCMAKE_C_FLAGS="$march" -DCMAKE_CXX_FLAGS="$march" \
         -DRRV_PCSX2_GS_BRIDGE_MANIFEST="$bridge_build/rrv-pcsx2-gs-bridge-manifest.json" \
         -DRRV_PCSX2_GS_BRIDGE_MANIFEST_VERIFIER="$repo/tools/android/bridge_manifest.py" \
         -DRRV_PCSX2_SOURCE_DIR="$repo/build-deps/pcsx2-2.8.2" \
@@ -127,6 +131,8 @@ if run_from apk; then
     sed -e "s/@PACKAGE@/dev.magatama.nocturne/" -e "s/@VERSION_CODE@/$build_no/" -e "s/@VERSION_NAME@/b$build_no/" \
         -e "s/@MIN_SDK@/$API/" -e "s/@TARGET_SDK@/$TARGET_SDK/" \
         "$repo/cmake/android/AndroidManifest.xml.in" > "$apkdir/AndroidManifest.xml"
+    # MAGATAMA_ANDROID_DEBUGGABLE=1: a profiling build (simpleperf --app needs a debuggable app).
+    [[ "${MAGATAMA_ANDROID_DEBUGGABLE:-0}" == 1 ]] && sed -i 's/<application/<application android:debuggable="true"/' "$apkdir/AndroidManifest.xml"
     "$bt/aapt2" link -o "$apkdir/unaligned.apk" -I "$jar" --manifest "$apkdir/AndroidManifest.xml" \
         -A "$apkdir/assets" "$apkdir/res.zip" --min-sdk-version $API --target-sdk-version $TARGET_SDK
     (cd "$apkdir" && zip -q -0 -r unaligned.apk lib && zip -q unaligned.apk classes.dex)

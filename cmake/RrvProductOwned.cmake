@@ -51,6 +51,10 @@ if(ANDROID)
     # The NDK's libc++ (r28) keeps std::jthread/std::stop_token behind its experimental switch (main_product.cpp).
     target_compile_options(Fukami PRIVATE -fexperimental-library)
     target_link_libraries(Fukami PRIVATE c++experimental)
+    # Bind libmain.so's own functions inside it: the generated code calls the runtime's checkpoint before every
+    # guest instruction, and as preemptible symbols those calls went through the PLT (Nova profile: 4% of the
+    # game thread in PLT stubs).
+    target_link_options(Fukami PRIVATE -Wl,-Bsymbolic-functions)
 endif()
 if(IOS)
     set(MAGATAMA_IOS_MIN_OS "16.0" CACHE STRING "Info.plist MinimumOSVersion")

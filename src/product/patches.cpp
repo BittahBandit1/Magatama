@@ -12,6 +12,7 @@
 //      to answer "does Nocturne ever reach this routine?" while bringing the game up.
 // Nocturne-specific fixes are added below as the boot log reveals them.
 
+#include <ctime>
 #include "patches.h"
 #include "rrv_nocturne_aspect.h"
 #include "nocturne_render_pose_trace.h"
@@ -211,16 +212,24 @@ magatama::pose_trace::Record poseRecord(uint8_t* ram,PS2Runtime* rt,uint32_t kin
 // every 300 fields. Off: one predictable branch per hook.
 struct InterpProfile {
     bool on=[]{const char* v=std::getenv("MAGATAMA_INTERP_PROFILE");return v&&v[0]=='1';}();
-    std::atomic<uint64_t> observeNs{0},postNs{0},publishNs{0},unpackNs{0},skinNs{0},records{0},unpacks{0},draws{0};
+    std::atomic<uint64_t> observeNs{0},postNs{0},publishNs{0},unpackNs{0},skinNs{0},skinCpuNs{0},midNs{0},midCpuNs{0},midCalls{0},skinCalls{0},records{0},unpacks{0},draws{0};
+#if defined(_WIN32)
+    static uint64_t cpuNow(){return 0;} // thread CPU time: POSIX hosts only
+#else
+    static uint64_t cpuNow(){timespec t{};clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t);return uint64_t(t.tv_sec)*1000000000ull+uint64_t(t.tv_nsec);}
+#endif
+    void(*skinReport)()=nullptr;
     uint64_t lastField=0;std::chrono::steady_clock::time_point last=std::chrono::steady_clock::now();
     static uint64_t now(){return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
     void report(uint64_t field){
         if(!on||field<lastField+300)return;
         const auto t=std::chrono::steady_clock::now();const double secs=std::chrono::duration<double>(t-last).count();
         const double n=double(field-lastField),ms=1e-6/n;
-        std::fprintf(stderr,"[interp-profile] field=%llu fields/s=%.1f per-field ms: ee-observe=%.3f ee-post=%.3f owner-publish=%.3f owner-unpack=%.3f ee-skin=%.3f | per-field records=%.0f unpacks=%.0f\n",
+        std::fprintf(stderr,"[interp-profile] field=%llu fields/s=%.1f per-field ms: ee-observe=%.3f ee-post=%.3f owner-publish=%.3f owner-unpack=%.3f ee-skin=%.3f (cpu %.3f) halfway=%.3f (cpu %.3f) | per-field records=%.0f unpacks=%.0f skin-calls=%.1f halfway-calls=%.1f\n",
             (unsigned long long)field,n/secs,observeNs.exchange(0)*ms,postNs.exchange(0)*ms,publishNs.exchange(0)*ms,unpackNs.exchange(0)*ms,skinNs.exchange(0)*ms,
-            records.exchange(0)/n,unpacks.exchange(0)/n);
+            skinCpuNs.exchange(0)*ms,midNs.exchange(0)*ms,midCpuNs.exchange(0)*ms,
+            records.exchange(0)/n,unpacks.exchange(0)/n,skinCalls.exchange(0)/n,midCalls.exchange(0)/n);
+        if(skinReport)skinReport();
         lastField=field;last=t;
     }
 };
@@ -315,10 +324,12 @@ uint32_t skinPayload(const uint8_t* ram,uint32_t header,uint32_t& bytes){
 void skinGenerateInner(uint8_t* ram,R5900Context* c,PS2Runtime* rt);
 void skinGenerate(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
     auto& prof=interpProfile();if(!prof.on){skinGenerateInner(ram,c,rt);return;}
-    const uint64_t t0=InterpProfile::now();skinGenerateInner(ram,c,rt);prof.skinNs+=InterpProfile::now()-t0;
+    const uint64_t t0=InterpProfile::now(),c0=InterpProfile::cpuNow();skinGenerateInner(ram,c,rt);
+    prof.skinNs+=InterpProfile::now()-t0;prof.skinCpuNs+=InterpProfile::cpuNow()-c0;++prof.skinCalls;
 }
 void skinGenerateInner(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
     auto& skin=magatama::skin::interpolator();
+    const auto callStart=std::chrono::steady_clock::now();
     const uint32_t ra=GPR_U32(c,31),node=skinPhys(GPR_U32(c,4));const int32_t frame=int32_t(GPR_U32(c,8));
     struct Slot{uint32_t at;std::array<uint8_t,128> mid;};
     std::vector<Slot> slots;std::array<uint8_t,64> screenMid{};bool ready=false;
@@ -332,6 +343,9 @@ void skinGenerateInner(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
     {
         std::lock_guard<std::mutex> lock(skin.mutex());
         skin.frame(frame);
+        // Ask the budget first: a model it skips pays only for history copies,
+        // not for the halfway matrices it would not use.
+        const bool wanted=root&&skin.allow(root);
         const uint32_t list=root?skinPhys(poseWord(ram,root)):0;
         if(!((frame==0||frame==1)&&list)&&debugOn(rt))std::fprintf(stderr,"[skin-debug] no-list field=%llu root=%06x frame=%d\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,frame);
         if((frame==0||frame==1)&&list){
@@ -351,13 +365,15 @@ void skinGenerateInner(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
                 // (hidden or newly shown part): leave it exactly as the game has
                 // it, and do not keep it as pose history.
                 if(n>32u*1024*1024-0x100||std::memcmp(ram+at,ram+n+0xc0,64)!=0){skin.forgetNode(n);continue;}
+                if(!wanted)break; // skipped this frame: no work at all (it blends again a frame after it is next allowed)
                 if(skin.nodeMid(n,ram+at,slot.mid.data()))slots.push_back(slot);else{ready=false;if(debugOn(rt)){++debugLines;std::fprintf(stderr,"[skin-debug] node-fail field=%llu root=%06x node=%06x i=%d/%d why=%d\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,n,i,count,skin.lastWhy);}}
             }
+            if(!wanted)ready=false;
             const bool screenOk=ready&&!slots.empty()&&skin.screenMid(root,ram+kScreenTm,screenMid.data());
             if(ready&&!screenOk&&debugOn(rt)){++debugLines;std::fprintf(stderr,"[skin-debug] screen-fail field=%llu root=%06x\n",(unsigned long long)rt->gate3TemporalV1().starts(),root);}
             ready=screenOk;
         }
-        if(ready&&!skin.allow(root)){ready=false;if(debugOn(rt))std::fprintf(stderr,"[skin-debug] budget-skip field=%llu root=%06x gen=%llu\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,(unsigned long long)skin.generation());}
+        if(root&&!wanted){ready=false;if(debugOn(rt))std::fprintf(stderr,"[skin-debug] budget-skip field=%llu root=%06x gen=%llu\n",(unsigned long long)rt->gate3TemporalV1().starts(),root,(unsigned long long)skin.generation());}
         if(!ready)skin.bad(root);
         skin.prune();
     }
@@ -365,9 +381,15 @@ void skinGenerateInner(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
         // Original call only. Its packet address may still hold an in-between
         // entry from an earlier frame (same buffer half): forget it, or the chain
         // would substitute that old pose into this frame.
+        const auto genStart=std::chrono::steady_clock::now();
         g_skinGen(ram,c,rt);
+        const auto genEnd=std::chrono::steady_clock::now();
         uint32_t bytes=0;const uint32_t at=c->pc==ra?skinPayload(ram,GPR_U32(c,2),bytes):0;
-        if(at){std::lock_guard<std::mutex> lock(skin.mutex());skin.forget(at);}
+        std::lock_guard<std::mutex> lock(skin.mutex());
+        if(at)skin.forget(at);
+        // Bookkeeping before the call (a refused model's halfway matrices) counts against the budget.
+        skin.spent(0,std::chrono::duration<double,std::micro>(genStart-callStart).count()+
+                   std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-genEnd).count());
         return;
     }
     // Halfway pass: original code, original inputs except the matrices. It
@@ -379,8 +401,10 @@ void skinGenerateInner(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
     for(size_t i=0;i<slots.size();++i){std::memcpy(saved[i].data(),ram+slots[i].at,128);std::memcpy(ram+slots[i].at,slots[i].mid.data(),128);}
     std::memcpy(screenSaved.data(),ram+kScreenTm,64);std::memcpy(ram+kScreenTm,screenMid.data(),64);
     const auto midStart=std::chrono::steady_clock::now();
+    auto& midProf=interpProfile();const uint64_t midCpu0=midProf.on?InterpProfile::cpuNow():0;
     g_skinGen(ram,c,rt);
     const double midUs=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-midStart).count();
+    if(midProf.on){midProf.midNs+=uint64_t(midUs*1000.0);midProf.midCpuNs+=InterpProfile::cpuNow()-midCpu0;++midProf.midCalls;}
     const bool midReturned=c->pc==ra;const uint32_t midHeader=GPR_U32(c,2);
     uint32_t midEnd;std::memcpy(&midEnd,ram+kPacketBuffPtr,4);
     uint32_t midBytes=0;const uint32_t midAt=midReturned?skinPayload(ram,midHeader,midBytes):0;
@@ -398,9 +422,14 @@ void skinGenerateInner(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
         reinterpret_cast<const uint8_t*>(&after)+offsetof(R5900Context,cop0_index),
         offsetof(R5900Context,cop0_errorepc)+sizeof(after.cop0_errorepc)-offsetof(R5900Context,cop0_index));
     // Endpoint pass: exactly the original call.
+    const auto endStart=std::chrono::steady_clock::now();
     g_skinGen(ram,c,rt);
+    const auto endEnd=std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(skin.mutex());
-    skin.spent(midUs);
+    (void)midUs;
+    struct Charge{magatama::skin::Interpolator& s;uint32_t root;std::chrono::steady_clock::time_point a,b,e;
+        ~Charge(){s.spent(root,std::chrono::duration<double,std::micro>(b-a).count()+std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-e).count());}}
+        charge{skin,root,callStart,endStart,endEnd}; // everything but the endpoint pass itself
     uint32_t bytes=0;const uint32_t at=c->pc==ra?skinPayload(ram,GPR_U32(c,2),bytes):0;
     // Endpoint culled entirely but the halfway pose shows a sliver: there is
     // no chain slot for it; that silhouette edge misses one field. The rest of
@@ -432,6 +461,9 @@ void armRenderPoseTrace(PS2Runtime& rt) {
     const char* skinEnv=std::getenv("MAGATAMA_INTERPOLATE_SKIN");
     if(enabled && !(skinEnv&&skinEnv[0]=='0')){
         magatama::skin::interpolator().configure();
+        interpProfile().skinReport=[]{auto& b=magatama::skin::interpolator().budget;
+            std::fprintf(stderr,"[interp-profile] skin budget-us=%.0f frames=%llu slow=%llu skipped-model-calls=%llu\n",
+                b.budgetUs,(unsigned long long)b.frames,(unsigned long long)b.slowFrames,(unsigned long long)b.skippedModels);};
         magatama::pose::interpolator().rootHeldBack=[](uint32_t root){return magatama::skin::interpolator().rootHeldBack(root&0x01ffffffu);};
         wrap(0x2b9178,g_skinGen,skinGenerate);
         g_magatamaChainPatch=[](uint32_t source,std::vector<uint8_t>& stream,size_t offset,uint32_t bytes){

@@ -1,6 +1,6 @@
 diff -ru a/bridge.cpp b/bridge.cpp
 --- a/bridge.cpp	2026-11-04 16:12:09.920875358 -0600
-+++ b/bridge.cpp	2026-11-04 22:20:58.455769361 -0600
++++ b/bridge.cpp	2026-11-06 11:18:43.271579438 -0600
 @@ -286,8 +286,14 @@
      // environment, bundle, and default-library fallbacks would sever that
      // source-derived authority.
@@ -28,7 +28,28 @@ diff -ru a/bridge.cpp b/bridge.cpp
      VMManager::Internal::LoadStartupSettings();
  
      const std::string roboto_path =
-@@ -1221,7 +1231,8 @@
+@@ -576,6 +586,20 @@
+     options.UserHacks_CPUSpriteRenderBW = cpu_sprite_bw;
+     options.UserHacks_CPUSpriteRenderLevel = 1;
+     options.UserHacks_RewriteLargeST = true;
++#if defined(__ANDROID__)
++    // Android: texture barriers (a draw sampling the target it draws into) are off by default. On the Adreno 740
++    // driver they returned stale target contents to the dialogue HUD (scene pieces in the name box, an opaque square
++    // behind the "next" arrow); without them PCSX2 samples a copy of the target, as on Metal's copy path.
++    // RRV_PCSX2_GS_TEXTURE_BARRIERS=1 turns them back on. RRV_PCSX2_GS_VS_EXPAND=0 draws sprites without
++    // vertex-shader expansion (a diagnostic).
++    options.OverrideTextureBarriers = 0;
++    if (const char* v = std::getenv("RRV_PCSX2_GS_TEXTURE_BARRIERS"); v && (v[0] == '0' || v[0] == '1') && !v[1])
++        options.OverrideTextureBarriers = v[0] - '0';
++    if (const char* v = std::getenv("RRV_PCSX2_GS_VS_EXPAND"); v && v[0] == '0' && !v[1])
++        options.DisableVertexShaderExpand = true;
++    std::fprintf(stderr, "[pcsx2-gs-bridge] Android: OverrideTextureBarriers=%d DisableVertexShaderExpand=%d\n",
++                 static_cast<int>(options.OverrideTextureBarriers), options.DisableVertexShaderExpand ? 1 : 0);
++#endif
+     bool paltex = true;
+     const bool paltex_overridden = ParseMetalPaltexOverride(paltex);
+     options.GPUPaletteConversion = paltex;
+@@ -1221,7 +1245,8 @@
      if (direct_requested && (!config ||
          config->surface.struct_size < sizeof(RrvPcsx2GsBridgeSurface) ||
          (config->surface.kind != RRV_PCSX2_GS_SURFACE_LINUX_X11 &&
@@ -38,7 +59,18 @@ diff -ru a/bridge.cpp b/bridge.cpp
          (config->surface.flags & RRV_PCSX2_GS_SURFACE_FLAG_CALLER_OWNS_HANDLES) == 0u ||
          !config->surface.native_view || !config->surface.native_layer ||
          config->surface.width_pixels == 0u || config->surface.height_pixels == 0u ||
-@@ -3492,9 +3503,94 @@
+@@ -3141,6 +3166,10 @@
+ // ProcessPointerButtonEvent, ProcessGenericInputEvent) at PCSX2 2.8.2
+ // (fd9d310ccbb6, GPL-3.0+), called directly because this bridge has no MTGS
+ // thread to marshal onto.
++#if defined(__ANDROID__)
++extern std::atomic<u64> g_rrv_display_frames; // GSDeviceVK.cpp (present pacing)
++extern float g_rrv_display_ms[128];
++#endif
+ namespace {
+ 
+ std::mutex s_overlay_mutex; // held across a frame callback
+@@ -3492,9 +3521,108 @@
  }
  
  // Runs the host overlay, if one is registered, inside the open ImGui frame.
@@ -63,23 +95,37 @@ diff -ru a/bridge.cpp b/bridge.cpp
 +    static float window_max = 0.0f, window_sum = 0.0f;
 +    static float fps = 0.0f, avg_ms = 0.0f, max_ms = 0.0f;
 +    const Clock::time_point now = Clock::now();
-+    if (last != Clock::time_point{})
-+    {
-+        const float ms = std::chrono::duration<float, std::milli>(now - last).count();
++    auto sample = [&](float ms) {
 +        history[head] = ms;
 +        head = (head + 1) % kHistory;
 +        window_sum += ms;
 +        window_max = std::max(window_max, ms);
 +        ++window_frames;
++    };
++    // Android with present pacing: what the display showed (each frame's on-screen length, a few frames late).
++    // Elsewhere, or before the display has reported: the interval between this overlay's own frames.
++    bool display = false;
++#if defined(__ANDROID__)
++    static u64 seen = 0;
++    const u64 shown = ::g_rrv_display_frames.load(std::memory_order_acquire);
++    if (shown)
++    {
++        display = true;
++        for (u64 i = std::max(seen, shown > 128 ? shown - 128 : 0); i < shown; ++i)
++            sample(::g_rrv_display_ms[i % 128]);
++        seen = shown;
 +    }
-+    else
++#endif
++    if (!display && last != Clock::time_point{})
++        sample(std::chrono::duration<float, std::milli>(now - last).count());
++    if (window_start == Clock::time_point{})
 +        window_start = now;
 +    last = now;
 +    const float window_s = std::chrono::duration<float>(now - window_start).count();
 +    if (window_s >= 0.5f && window_frames > 0)
 +    {
-+        fps = window_frames / window_s;
 +        avg_ms = window_sum / window_frames;
++        fps = display ? 1000.0f / avg_ms : window_frames / window_s;
 +        max_ms = window_max;
 +        window_start = now;
 +        window_frames = 0;

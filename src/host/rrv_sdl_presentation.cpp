@@ -320,6 +320,12 @@ public:
 #endif
         switch (event.type)
         {
+        case SDL_KEYDOWN:
+            // A key that goes down and up between two pad reads (a quick tap, or Android's injected key events)
+            // still counts as held for 100 ms, so the game sees the press.
+            if (event.key.repeat == 0 && event.key.keysym.scancode < SDL_NUM_SCANCODES)
+                m_keyLatchUntil[event.key.keysym.scancode] = SDL_GetTicks64() + 100u;
+            break;
         case SDL_CONTROLLERDEVICEADDED:
             m_openFailedCount = 0u; // the device set changed: failed opens get one new attempt
             maybeOpenControllerLocked(event.cdevice.which);
@@ -406,6 +412,24 @@ public:
         Slot &first = m_slots[0];
 
         const Uint8 *keys = SDL_GetKeyboardState(nullptr);
+        if (keys)
+        {
+            // Keys still inside their tap latch (handleEvent) read as held.
+            const Uint64 now = SDL_GetTicks64();
+            bool latched = false;
+            for (int code = 0; code < SDL_NUM_SCANCODES; ++code)
+                if (m_keyLatchUntil[code] > now && !keys[code])
+                {
+                    if (!latched)
+                    {
+                        std::copy(keys, keys + SDL_NUM_SCANCODES, m_keysWithLatch.begin());
+                        latched = true;
+                    }
+                    m_keysWithLatch[code] = 1;
+                }
+            if (latched)
+                keys = m_keysWithLatch.data();
+        }
         m_keyboardButtons = 0u;
         if (!keys || !m_window)
         {
@@ -442,7 +466,26 @@ public:
                                 m_keyboardButtons, controller.pressedButtons,
                                 rrv::m2ppad::SelectedSource::Controller);
 #else
-            first.cachedState = menuGateLocked(first, hostHotkeysLocked(controllerStateLocked(first)));
+            HostPadState controller = controllerStateLocked(first);
+            // RRV_PAD_MERGE_KEYBOARD=1 (Android's default): the keyboard also drives port 0 while a controller is
+            // connected, buttons combined and a held keyboard direction taking over the left stick. Remote testing
+            // over ADB sends keyboard keys; handhelds report their built-in controls as a controller.
+            static const bool mergeKeyboard = [] {
+                const char *value = std::getenv("RRV_PAD_MERGE_KEYBOARD");
+                return value && value[0] == '1';
+            }();
+            if (mergeKeyboard && keyboard.pressedButtons)
+            {
+                controller.pressedButtons |= keyboard.pressedButtons;
+                if (keyboard.leftX != 0.0f || keyboard.leftY != 0.0f)
+                {
+                    controller.leftX = keyboard.leftX;
+                    controller.leftY = keyboard.leftY;
+                }
+                controller.leftTrigger = std::max(controller.leftTrigger, keyboard.leftTrigger);
+                controller.rightTrigger = std::max(controller.rightTrigger, keyboard.rightTrigger);
+            }
+            first.cachedState = menuGateLocked(first, hostHotkeysLocked(controller));
             first.cachedCapabilities = controllerCapabilitiesLocked(first);
 #endif
             return;
@@ -896,6 +939,8 @@ private:
     SDL_Window *m_window = nullptr; // owned by SdlPresentation
     const std::shared_ptr<const fukami::menu::Menu> m_menu;
     mutable std::mutex m_mutex;
+    std::array<Uint64, SDL_NUM_SCANCODES> m_keyLatchUntil{}; // tap latch per scancode (SDL_GetTicks64 ms)
+    std::array<Uint8, SDL_NUM_SCANCODES> m_keysWithLatch{};
     // Port 0 and port 1: m_slotIds (rrv_pad_slots.h) says which controller holds which.
     std::array<Slot, padslots::kPorts> m_slots{};
     padslots::SlotIds m_slotIds = padslots::emptySlots();

@@ -3400,6 +3400,9 @@ void PS2Runtime::run()
 #include "gate3_rrv_temporal_owner.inc"
 
 #include "gate3_temporal_runtime.inc"
+// Starts the real-time pacer had to wait for: the game was ahead of real time there, so it
+// had time to spare (Magatama's 60 FPS skin budget grows only while these keep coming).
+uint64_t rrv_gate3_realtime_waits(){return gate3RealtimePacerV1().waits;}
 
 #include "gate3_guest_admission_runtime.inc"
 #include "gate3_guest_admission_loader.inc"

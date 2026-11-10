@@ -12,6 +12,7 @@
 //      to answer "does Nocturne ever reach this routine?" while bringing the game up.
 // Nocturne-specific fixes are added below as the boot log reveals them.
 
+#include "../host/rrv_game_signals.h"
 #include <ctime>
 #include "patches.h"
 #include "rrv_nocturne_aspect.h"
@@ -732,7 +733,41 @@ void armCdLatency(PS2Runtime& runtime) {
 // what the spin waits for), then run the function, which finds the flag clear and carries on.
 namespace {
 PS2Runtime::RecompiledFunction g_frameWaitOrig;
+// Guest RAM dumps for finding game state by memory diffs (F12 with MAGATAMA_RAM_DUMP_DIR set; rrv_game_signals.h).
+void serviceRamDump(const uint8_t* rdram) {
+    if (rrv::host::ramDumpRequests.load(std::memory_order_relaxed) == 0) return;
+    rrv::host::ramDumpRequests.store(0);
+    static const char* dir = std::getenv("MAGATAMA_RAM_DUMP_DIR");
+    static int count = 0;
+    if (!dir) return;
+    const std::string path = std::string(dir) + "/ram-" + std::to_string(++count) + ".bin";
+    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+        std::fwrite(rdram, 1, 32u * 1024u * 1024u, f);
+        std::fclose(f);
+        std::fprintf(stderr, "[ram-dump] %s\n", path.c_str());
+    }
+}
+// The main (□) field menu, for the on-screen pad's D-pad (rrv_game_signals.h). The address of its open flag is not
+// known yet; MAGATAMA_MENU_FLAG=<hex address>[=<value when open>] tries one (a byte; nonzero, or that value, = open).
+void publishFieldMenu(const uint8_t* rdram) {
+    struct Probe { uint32_t address = 0; int open = -1; };
+    static const Probe probe = [] {
+        Probe p;
+        if (const char* v = std::getenv("MAGATAMA_MENU_FLAG")) {
+            char* end = nullptr;
+            p.address = static_cast<uint32_t>(std::strtoul(v, &end, 16)) & 0x01FFFFFFu;
+            if (end && *end == '=') p.open = static_cast<int>(std::strtol(end + 1, nullptr, 0));
+        }
+        return p;
+    }();
+    if (!probe.address) return;
+    const uint8_t value = rdram[probe.address];
+    rrv::host::fieldMenuOpen.store(probe.open < 0 ? (value != 0 ? 1 : 0) : (value == probe.open ? 1 : 0),
+                                   std::memory_order_relaxed);
+}
 void frameWaitTrampoline(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    serviceRamDump(rdram);
+    publishFieldMenu(rdram);
     // MAGATAMA_GS_TRACE_AT=<frame>: start an armed RRV_GS_TRACE capture once the guest frame count reaches <frame>.
     static const uint64_t traceAt = [] { const char* v = std::getenv("MAGATAMA_GS_TRACE_AT"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
     if (traceAt && runtime->gate3TemporalV1().starts() >= traceAt) rrv::gstrace::trigger();

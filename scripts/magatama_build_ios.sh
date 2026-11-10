@@ -118,7 +118,8 @@ for m in "$metal"/*.metallib; do print "$m: $(xcrun -sdk $sdkname metal-objdump 
 rm -rf "$out/bridge-src"; cp -R "$repo/tools/pcsx2-gs-bridge" "$out/bridge-src" &&
 (cd "$out/bridge-src" && patch -s -p1 < "$repo/tools/patches/ios/bridge-metal-surface-ios.diff" &&
     patch -s -p1 < "$repo/tools/patches/ios/bridge-resources-ios.diff" &&
-    patch -s -p1 < "$repo/tools/patches/ios/bridge-thermal-osd-ios.diff") ||
+    patch -s -p1 < "$repo/tools/patches/ios/bridge-thermal-osd-ios.diff" &&
+    patch -s -p1 < "$repo/tools/patches/mobile/bridge-touch-draw.diff") ||
     { print "!! bridge source prep failed"; exit 1; }
 print "== pcsx2 configure (metal resources: $metal)"
 cmake -S "$pcsx2" -B "$out/build-pcsx2" "${ios_cmake[@]}" -DCMAKE_SYSTEM_PROCESSOR=aarch64 \

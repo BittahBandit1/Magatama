@@ -2,6 +2,9 @@
 // environment mapping mirror scripts/run_gate4_product.sh (rrv.ini reader and
 // the `extra` list) so a launch from the app and from ./run.sh with the same
 // ini give the runtime the same environment (Gate-9 APP6).
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include "fukami_settings.h"
 
 #include <algorithm>
@@ -366,6 +369,16 @@ const std::vector<Spec> &schema()
          Kind::boolean, "true"},
         {"input", "rumble", "Rumble", "Controller vibration.",
          Kind::boolean, "true"},
+        // iPhone, iPad and Android: the on-screen controller (src/host/rrv_touch_pad.h). It hides by itself while a
+        // controller is connected; this turns it off altogether. Not in the menu on other platforms.
+        {"input", "touch_controls", "Touch controls",
+         "On-screen controller. It hides while a controller is connected.",
+         Kind::boolean, "true", {}, 0, 0, Apply::live,
+#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(__ANDROID__)
+         true},
+#else
+         false},
+#endif
         // [game]
         {"game", "car_lod", "Car detail distance", "Keeps cars detailed farther away. 1 is the stock game.",
          Kind::number, "4", {}, 1, 16, Apply::restart, false}, // Magatama: RR5 only
@@ -479,6 +492,7 @@ std::vector<std::pair<std::string,std::string>> magatamaSavedEnvironment(const I
         {"rendering","mipmap","RRV_PCSX2_GS_FULL_HWMIPMAP",true},
         {"input","analog","RRV_PAD_ANALOG",true},
         {"input","rumble","RRV_PAD_RUMBLE",true},
+        {"input","touch_controls","MAGATAMA_TOUCH_CONTROLS",true},
         {"timing","split_gs","RRV_VU1GS_SPLIT",true},
         {"timing","pacer_spin","RRV_GATE3_REALTIME_SPIN_MS",false},
     };

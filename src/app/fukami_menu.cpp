@@ -118,6 +118,7 @@ bool appliesLive(std::string_view section, std::string_view key)
     // setting requests a game restart or changes original guest timing.
     return (section == "display" && (key == "fullscreen" || key == "aspect" || key == "integer_scaling" || key == "nocturne_aspect")) ||
            (section == "audio" && (key == "volume" || key == "mute")) ||
+           (section == "input" && key == "touch_controls") ||
            (section == "rendering" && (key == "fxaa" || key == "cas" || key == "metal_hud" || key == "scale" || key == "aa1" || key == "aniso" ||
                                          key == "texture_filter" || key == "sprite_filter" || key == "mipmap"));
 }
@@ -137,6 +138,11 @@ Menu::Menu(std::filesystem::path ini, const std::filesystem::path &defaults) :
     {
         const char *hud = std::getenv("MTL_HUD_ENABLED");
         m_launch[id("rendering", "metal_hud")] = (hud && hud[0] == '1') ? "true" : "false";
+    }
+    // The on-screen controller follows MAGATAMA_TOUCH_CONTROLS (on unless "0").
+    {
+        const char *touch = std::getenv("MAGATAMA_TOUCH_CONTROLS");
+        m_launch[id("input", "touch_controls")] = (touch && touch[0] == '0') ? "false" : "true";
     }
     // Magatama Terminal defaults intentionally differ from legacy RR5/app
     // schema defaults. Show the resolved running controls, not a fictional
@@ -334,6 +340,8 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
     }
     if (!isOpen())
     {
+        if (m_idleOverlay)
+            m_idleOverlay(m_idleOverlayContext);
         if (m_wasOpen)
         {
             // Release anything ImGui still holds down from the menu session.
@@ -629,6 +637,8 @@ bool Menu::applyLive(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, c
         ui.set_cas(static_cast<int>(std::clamp<long>(toLong(value, 0), 0, 100)));
     else if (spec.section == "rendering" && spec.key == "metal_hud")
         m_metalHudRequest.store(settings::boolValue(value) ? 1 : 0); // the host sets it on the window's layer
+    else if (spec.section == "input" && spec.key == "touch_controls")
+        m_touchControlsRequest.store(settings::boolValue(value) ? 1 : 0); // the host's on-screen pad
     else if (spec.section == "rendering" && appliesLive(spec.section, spec.key))
         return ui.set_render_option && ui.set_render_option(std::string(spec.key).c_str(), value.c_str());
     return true;

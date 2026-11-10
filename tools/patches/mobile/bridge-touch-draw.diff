@@ -1,0 +1,55 @@
+--- a/bridge.cpp	2026-11-07 13:25:08.177539344 -0600
++++ b/bridge.cpp	2026-11-07 13:25:08.190392547 -0600
+@@ -3559,6 +3559,52 @@
+     std::fprintf(stderr, "[pcsx2-gs-bridge] host overlay %s\n", frame ? "registered" : "cleared");
+ }
+ 
++// Touchscreen pad drawing for the host overlay (iOS/Android, src/host/rrv_touch_pad.h). Valid only inside the
++// overlay callback (the ImGui frame is open). Points are fractions of the display width (x) and height (y); radii,
++// text size and thickness are fractions of its height. rgba is 0xRRGGBBAA. Shapes: 0 filled circle (x0,y0 centre,
++// x1 radius), 1 circle outline, 2 filled rect (x0,y0)-(x1,y1), 3 line, 4 text centred at x0,y0 (x1 size),
++// 5 triangle outline (x1 radius), 6 rect outline.
++extern "C" RRV_PCSX2_GS_BRIDGE_API void rrv_pcsx2_gs_bridge_draw_shape(int shape, float x0, float y0, float x1,
++                                                                      float y1, uint32_t rgba, float thickness,
++                                                                      const char* text)
++{
++    if (!ImGui::GetCurrentContext())
++        return;
++    const ImVec2 size = ImGui::GetIO().DisplaySize;
++    const float h = size.y;
++    ImDrawList* list = ImGui::GetForegroundDrawList();
++    const ImU32 col = IM_COL32(rgba >> 24, (rgba >> 16) & 0xffu, (rgba >> 8) & 0xffu, rgba & 0xffu);
++    const ImVec2 p0(x0 * size.x, y0 * size.y);
++    const ImVec2 p1(x1 * size.x, y1 * size.y);
++    const float line = std::max(1.0f, thickness * h);
++    const float rounding = 0.012f * h;
++    switch (shape)
++    {
++        case 0: list->AddCircleFilled(p0, x1 * h, col, 48); break;
++        case 1: list->AddCircle(p0, x1 * h, col, 48, line); break;
++        case 2: list->AddRectFilled(p0, p1, col, rounding); break;
++        case 3: list->AddLine(p0, p1, col, line); break;
++        case 4:
++            if (text)
++            {
++                ImFont* font = ImGui::GetFont();
++                const float px = x1 * h;
++                const ImVec2 extent = font->CalcTextSizeA(px, FLT_MAX, 0.0f, text);
++                list->AddText(font, px, ImVec2(p0.x - extent.x * 0.5f, p0.y - extent.y * 0.5f), col, text);
++            }
++            break;
++        case 5:
++        {
++            const float r = x1 * h;
++            list->AddTriangle(ImVec2(p0.x, p0.y - r), ImVec2(p0.x - r * 0.866f, p0.y + r * 0.5f),
++                              ImVec2(p0.x + r * 0.866f, p0.y + r * 0.5f), col, line);
++            break;
++        }
++        case 6: list->AddRect(p0, p1, col, rounding, line); break;
++        default: break;
++    }
++}
++
+ extern "C" int rrv_pcsx2_gs_bridge_set_original_present_plan(
+     RrvPcsx2GsBridge* bridge, uint64_t field, uint64_t source,
+     uint32_t present, uint32_t fields, char* error, uint32_t capacity)

@@ -74,6 +74,16 @@ public:
     // -1: none, 0: hide the Metal HUD, 1: show it.
     int takeMetalHudRequest() { return m_metalHudRequest.exchange(-1); }
     bool takeRestartRequest() { return m_restartRequest.exchange(false); }
+    // -1: none, 0: turn the on-screen controller off, 1: on.
+    int takeTouchControlsRequest() { return m_touchControlsRequest.exchange(-1); }
+
+    // Drawn on every overlay frame while the menu is closed (the touchscreen pad, rrv_touch_pad.h). Set once from
+    // the main thread before the overlay is registered.
+    void setIdleOverlay(void (*draw)(void *context), void *context)
+    {
+        m_idleOverlay = draw;
+        m_idleOverlayContext = context;
+    }
 
     // ---- GS owner thread (bridge overlay callback) -------------------------
     static void frameCallback(void *menu, const RrvPcsx2GsBridgeUi *ui);
@@ -90,6 +100,8 @@ private:
     void setStatus(std::string status);
     std::string status() const;
 
+    void (*m_idleOverlay)(void *) = nullptr;
+    void *m_idleOverlayContext = nullptr;
     const std::filesystem::path m_ini;
     settings::IniDocument m_defaults; // the app's bundled default ini; empty outside the app
     const std::filesystem::path m_saves;
@@ -103,6 +115,7 @@ private:
     std::atomic<int> m_fullscreenRequest{-1};
     std::atomic<bool> m_quitRequest{false};
     std::atomic<int> m_metalHudRequest{-1};
+    std::atomic<int> m_touchControlsRequest{-1};
     std::atomic<bool> m_restartRequest{false};
 
     std::mutex m_inputMutex;

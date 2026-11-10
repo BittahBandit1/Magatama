@@ -3,6 +3,8 @@
 #include "rrv_display_refresh.h"
 #include "rrv_pad_slots.h"
 #include "rrv_keyboard_pad.h"
+#include "rrv_touch_pad.h"
+#include "rrv_game_signals.h"
 #include "rrv_nocturne_aspect.h"
 #include "rrv_nocturne_original_frame.h"
 
@@ -364,7 +366,22 @@ public:
         }
     }
 
+    // The touchscreen pad (iOS/Android): combined into port 0 after every refresh.
+    void setTouchPad(std::shared_ptr<const rrv::host::TouchPad> touch) { m_touch = std::move(touch); }
+
     void refresh()
+    {
+        refreshPorts();
+        if (m_touch)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_slots[0].cachedState = m_touch->apply(m_slots[0].cachedState);
+            if (m_touch->visible() && !m_slots[0].controller)
+                m_slots[0].cachedCapabilities.analogSticks = m_analog; // its stick is analog
+        }
+    }
+
+    void refreshPorts()
     {
         // SDL's input queries have the same ownership as SDL_PollEvent: they
         // execute only on the product main thread. The guest pad thread sees
@@ -451,9 +468,14 @@ public:
         }
         // Read mouse state on the SDL owner thread with the keyboard. Only
         // clicks in the focused game window belong to the fallback pad.
+#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(__ANDROID__)
+        // Touchscreens: SDL turns touches into mouse clicks; they are the on-screen pad's, not Cross.
+        const bool leftMouseDown = false;
+#else
         const bool leftMouseDown = SDL_GetKeyboardFocus() == m_window &&
                                    SDL_GetMouseFocus() == m_window &&
                                    (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0u;
+#endif
         const HostPadState keyboard = rrv::host::keyboardPadState(
             keys, m_menu && m_menu->available(), leftMouseDown);
         m_keyboardButtons = keyboard.pressedButtons;
@@ -940,6 +962,7 @@ private:
     const std::shared_ptr<const fukami::menu::Menu> m_menu;
     mutable std::mutex m_mutex;
     std::array<Uint64, SDL_NUM_SCANCODES> m_keyLatchUntil{}; // tap latch per scancode (SDL_GetTicks64 ms)
+    std::shared_ptr<const rrv::host::TouchPad> m_touch;
     std::array<Uint8, SDL_NUM_SCANCODES> m_keysWithLatch{};
     // Port 0 and port 1: m_slotIds (rrv_pad_slots.h) says which controller holds which.
     std::array<Slot, padslots::kPorts> m_slots{};
@@ -1009,6 +1032,9 @@ public:
         bool left = false, right = false, up = false, down = false;
     };
     std::array<StickHold, 2> sticks{};
+    std::shared_ptr<rrv::host::TouchPad> touch; // iOS/Android on-screen pad (rrv_touch_pad.h)
+    rrv::host::TouchPad::DrawFn touchDraw = nullptr; // the bridge's rrv_pcsx2_gs_bridge_draw_shape
+    static void drawTouchPad(void *impl);
     bool threeFingerMenu = false; // iOS/Android: one menu toggle per three-finger touch
     std::vector<SDL_FingerID> touchFingers; // fingers down now, counted from the events themselves
     StickHold *stickFor(SDL_JoystickID id);
@@ -1590,18 +1616,35 @@ void SdlPresentation::Impl::routeMenuEvent(const SDL_Event &event)
     // when the third finger lands and re-arms when every finger is lifted. Fingers are counted from the events (by
     // the time an event is handled, a quick tap may already be over). Single touches reach the menu as SDL's mouse
     // events.
+    // With the on-screen pad (MAGATAMA_TOUCH_CONTROLS) the game's touches go to the pad and its menu button
+    // opens the menu; three fingers are then a normal grip, so the three-finger toggle only closes the menu.
     case SDL_FINGERDOWN:
         if (std::find(touchFingers.begin(), touchFingers.end(), event.tfinger.fingerId) == touchFingers.end())
             touchFingers.push_back(event.tfinger.fingerId);
+        if (touch && touch->visible() && !menu->isOpen())
+        {
+            if (touch->down(event.tfinger.fingerId, event.tfinger.x, event.tfinger.y))
+            {
+                touch->releaseAll();
+                toggleMenu();
+            }
+            return;
+        }
         if (!threeFingerMenu && touchFingers.size() >= 3)
         {
             threeFingerMenu = true;
             toggleMenu();
         }
         return;
+    case SDL_FINGERMOTION:
+        if (touch && !menu->isOpen())
+            touch->move(event.tfinger.fingerId, event.tfinger.x, event.tfinger.y);
+        return;
     case SDL_FINGERUP:
         touchFingers.erase(std::remove(touchFingers.begin(), touchFingers.end(), event.tfinger.fingerId),
                            touchFingers.end());
+        if (touch)
+            touch->up(event.tfinger.fingerId);
         if (touchFingers.empty())
             threeFingerMenu = false;
         return;
@@ -1722,6 +1765,13 @@ void SdlPresentation::Impl::routeMenuEvent(const SDL_Event &event)
     }
 }
 
+void SdlPresentation::Impl::drawTouchPad(void *impl)
+{
+    auto *self = static_cast<Impl *>(impl);
+    if (self->touch)
+        self->touch->draw(self->touchDraw);
+}
+
 void SdlPresentation::Impl::serviceMenu()
 {
     // Bind the overlay once the GS backend has loaded the bridge.
@@ -1734,6 +1784,17 @@ void SdlPresentation::Impl::serviceMenu()
         {
             bridgeImage = image;
             setOverlay = reinterpret_cast<void (*)(RrvPcsx2GsBridgeOverlayFrame, void *)>(entry);
+#if !defined(_WIN32)
+            if (touch)
+            {
+                touchDraw = reinterpret_cast<rrv::host::TouchPad::DrawFn>(
+                    dlsym(image, "rrv_pcsx2_gs_bridge_draw_shape"));
+                if (touchDraw)
+                    menu->setIdleOverlay(&Impl::drawTouchPad, this);
+                std::fprintf(stderr, "[touch-pad] on-screen controller %s\n",
+                             touchDraw ? "ready" : "unavailable (bridge cannot draw it)");
+            }
+#endif
             setOverlay(&fukami::menu::Menu::frameCallback, menu.get());
             menu->setAvailable(true);
             std::fprintf(stderr, "[fukami-menu] in-game menu ready (Esc or F1; settings %s)\n",
@@ -1921,6 +1982,15 @@ bool SdlPresentation::create(const char *title, std::string *error)
     impl->applyDisplayRefresh(impl->lastFullscreen);
     impl->menu->fullscreenChanged(impl->lastFullscreen, false);
     impl->pad = std::make_shared<SdlHostPadBackend>(impl->window, impl->menu);
+#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(__ANDROID__)
+    {
+        // The on-screen pad: on unless MAGATAMA_TOUCH_CONTROLS=0 (the menu's Input > Touch controls); hidden
+        // while a controller is connected (pumpEvents), so a handheld's built-in controls hide it.
+        const char *value = std::getenv("MAGATAMA_TOUCH_CONTROLS");
+        impl->touch = std::make_shared<rrv::host::TouchPad>(!(value && value[0] == '0'));
+        impl->pad->setTouchPad(impl->touch);
+    }
+#endif
     impl->pad->refresh();
     if (const char *test = std::getenv("RRV_TEST_SDL_LIFECYCLE");
         test && std::strcmp(test, "1") == 0)
@@ -2014,6 +2084,11 @@ void SdlPresentation::pumpEvents()
         {
             m_impl->requestFullscreen(!windowFullscreen(m_impl->window));
         }
+        else if (event.type == SDL_KEYDOWN && event.key.keysym.scancode == SDL_SCANCODE_F12 &&
+                 event.key.repeat == 0 && std::getenv("MAGATAMA_RAM_DUMP_DIR"))
+        {
+            rrv::host::ramDumpRequests.store(1); // the game layer writes guest RAM at its next frame
+        }
         else if (event.type == SDL_KEYDOWN && event.key.keysym.scancode == SDL_SCANCODE_F &&
                  (event.key.keysym.mod & KMOD_CTRL) != 0 && (event.key.keysym.mod & KMOD_GUI) != 0 &&
                  event.key.repeat == 0)
@@ -2050,6 +2125,25 @@ void SdlPresentation::pumpEvents()
             event.type == SDL_MOUSEBUTTONUP || event.type == SDL_MOUSEWHEEL)
             m_impl->cursorIdle.activity(std::chrono::steady_clock::now());
         m_impl->pad->handleEvent(event);
+    }
+    if (m_impl->touch)
+    {
+        int w = 0, h = 0;
+        SDL_GetWindowSize(m_impl->window, &w, &h);
+        if (w > 0 && h > 0)
+            m_impl->touch->setAspect(float(w) / float(h));
+        // Any connected controller hides the on-screen pad (SDL_IsGameController: not the accelerometer SDL lists
+        // as a joystick on phones).
+        bool controller = false;
+        for (int i = 0, n = SDL_NumJoysticks(); i < n && !controller; ++i)
+            controller = SDL_IsGameController(i) == SDL_TRUE;
+        m_impl->touch->setControllerConnected(controller);
+        m_impl->touch->setMenuOpen(rrv::host::fieldMenuOpen.load(std::memory_order_relaxed));
+        if (m_impl->menu)
+            if (const int on = m_impl->menu->takeTouchControlsRequest(); on >= 0)
+                m_impl->touch->setEnabled(on == 1);
+        if (m_impl->menu && m_impl->menu->isOpen())
+            m_impl->touch->releaseAll();
     }
     if (m_impl->menu)
         m_impl->serviceMenu();

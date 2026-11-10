@@ -46,7 +46,8 @@ if run_from pcsx2; then
         git -C "$pcsx2" apply "$p" || { echo "!! $p does not apply" >&2; exit 1; }
     done
     rm -rf "$out/bridge-src"; cp -R "$repo/tools/pcsx2-gs-bridge" "$out/bridge-src"
-    (cd "$out/bridge-src" && patch -s -p1 < "$repo/tools/patches/android/bridge-android.diff")
+    (cd "$out/bridge-src" && patch -s -p1 < "$repo/tools/patches/android/bridge-android.diff" &&
+        patch -s -p1 < "$repo/tools/patches/mobile/bridge-touch-draw.diff")
 fi
 
 # --------------------------------------------------------------------------------------------- 3. GS bridge

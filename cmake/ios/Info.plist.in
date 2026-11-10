@@ -13,7 +13,7 @@
 	<key>CFBundleVersion</key><string>${MAGATAMA_IOS_BUILD}</string>
 	<key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
 	<key>MinimumOSVersion</key><string>${MAGATAMA_IOS_MIN_OS}</string>
-	<key>UIDeviceFamily</key><array><integer>1</integer></array>
+	<key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
 	<key>UIRequiredDeviceCapabilities</key><array><string>arm64</string><string>metal</string></array>
 	<key>UIFileSharingEnabled</key><true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key><true/>
@@ -21,6 +21,8 @@
 	<key>UIStatusBarHidden</key><true/>
 	<key>UIViewControllerBasedStatusBarAppearance</key><false/>
 	<key>UISupportedInterfaceOrientations</key>
+	<array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
 	<key>UILaunchScreen</key><dict><key>UIColorName</key><string></string></dict>
 	<key>GCSupportsControllerUserInteraction</key><true/>

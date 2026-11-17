@@ -29,6 +29,12 @@ Magatama is built on [Fukami](https://github.com/danisandoval/fukami), the Ridge
   right one (SHA-256 of `SLUS_209.11`) before anything is copied.
 - Right Analog Stick controls the camera, enabled with an R3 click.
 
+## Performance and Compatibility
+
+Performance and compatibility has been tested on many pieces of hardware. For iOS, the minimum for sustained 30 FPS is the A15 Bionic. 
+On macOS, the minimum is A18 Pro or M1. Android minimum is Snapdragon 865. Adreno GPU is a requirement. 
+x86-64 Builds have not been made or tested at this time.
+
 ## Platforms
 
 | Platform | Status |
@@ -46,10 +52,6 @@ the disc); everything game-derived is generated from it on your computer. See [B
 
 Once built, the launcher's **Import Disc** button takes your disc image. On iPhone and iPad the disc, saves, settings
 and logs are in the app's folder in the Files app; on Android they are in `Documents/Magatama`.
-
-## Performance and Compatibility
-
-Performance and compatibility has been tested on many pieces of hardware. For iOS, the minimum for sustained 30 FPS is the A15 Bionic. On macOS, the minimum is A18 Pro or M1. Android minimum is Snapdragon 865. Adreno GPU is a requirement. x86-64 Builds have not been made or tested at this time.
 
 ## Contributing
 

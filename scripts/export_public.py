@@ -132,6 +132,12 @@ TEXT_GATES = [
     ("personal e-mail", re.compile(rb"dani\.sandoval" + b"@"), []),
     ("private key", re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----"), []),
     ("token", re.compile(rb"\b(?:ghp_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b"), []),
+    # Magatama: no machine-specific home folders, and no translated game code outside generated/ (the recompiler
+    # marks every function it emits with its original address range).
+    ("home folder path", re.compile(rb"/(?:Users|home)/[A-Za-z0-9._-]+/"),
+     ["scripts/check_legacy_live_no_f7.py", "scripts/check_product_direct.py", "scripts/export_public.py"]),
+    ("recompiled game code", re.compile(rb"^// Address: 0x[0-9a-fA-F]+ - 0x", re.M),
+     ["tools/nocturne-effects/generate.cpp", "third_party/ps2recomp/**"]),
 ]
 
 MAX_FILE_BYTES = 5 * 1024 * 1024

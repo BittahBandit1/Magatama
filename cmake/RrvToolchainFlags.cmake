@@ -16,7 +16,7 @@ if(WIN32 AND NOT RRV_CLANG_CL)
     message(FATAL_ERROR
         "Windows builds use clang-cl (the MSVC ABI and CRT with clang's code generator); found "
         "${CMAKE_CXX_COMPILER_ID} (${CMAKE_CXX_COMPILER_FRONTEND_VARIANT} front end) at ${CMAKE_CXX_COMPILER}. "
-        "Use the m0-windows-x86_64 preset from a shell that has run vcvars64 (see BUILDING.md).")
+        "Use the m0-windows-x86_64 preset from a shell that has run vcvars64 (see docs/FUKAMI_BUILDING.md).")
 endif()
 
 # Each helper stores a list in <out>; an empty list means "nothing to pass on this compiler".

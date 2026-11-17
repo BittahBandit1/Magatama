@@ -7,6 +7,7 @@
   generated/nocturne/legacy-stubs/ps2_recompiled_stubs.h  copy of the generation's stub header
   generated/nocturne/vu/                           private ahead-of-time VU catalogue extracted from the ELF
   generated/nocturne/native/                       reserved for native hot functions
+  generated/nocturne/effects/nocturne_bezier.cpp   battle/effect routines the generation leaves out
   generated/nocturne/source-manifest.json           the ELF identity the product checks at launch
 
 generated/ is ignored by git. Re-run after every regeneration.
@@ -17,16 +18,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 HOME = Path.home()
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-ap.add_argument("--generated", default="~/magatama/generated-nocturne")
-ap.add_argument("--elf", default="~/magatama/rom/SLUS_209.11")
+# Defaults: the folder layout next to this checkout (<parent>/generated-nocturne, <parent>/rom/SLUS_209.11).
+ap.add_argument("--generated", default=str(ROOT.parent / "generated-nocturne"))
+ap.add_argument("--elf", default=str(ROOT.parent / "rom/SLUS_209.11"))
 args = ap.parse_args()
 
-def local(p):  # the same paths as seen from wherever this runs (a mounted copy of the folder works too)
-    p = Path(p)
-    if p.exists():
-        return p
-    alt = ROOT.parent / p.relative_to("~/magatama")
-    return alt
+def local(p):
+    return Path(p).expanduser().resolve()
 
 gen, elf = local(args.generated), local(args.elf)
 if not (gen / "register_functions.cpp").is_file():
@@ -51,4 +49,8 @@ manifest = {"schema": "magatama-generated-v1", "game": "Shin Megami Tensei: Noct
 (dst / "source-manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
 subprocess.run([sys.executable, str(ROOT / "tools/vu-aot/vu_aot_gen.py"),
                 "--elf", str(elf), "--output", str(dst / "vu")], check=True)
+effects = dst / "effects/nocturne_bezier.cpp"
+if not effects.is_file():  # the omitted battle/effect routines (scripts/magatama_generate_bezier.py)
+    subprocess.run([sys.executable, str(ROOT / "scripts/magatama_generate_bezier.py"), "--elf", str(elf),
+                    "--out", str(effects)], check=True)
 print(f"generated/nocturne ready: {len(files)} files, ELF sha256 {h[:16]}...")

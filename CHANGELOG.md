@@ -2,6 +2,26 @@
 
 Versions follow [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`. The file `VERSION` holds the current one.
 
+## Magatama (unreleased developer preview)
+
+Magatama forks Fukami 1.1.0 for Shin Megami Tensei: Nocturne (USA, SLUS-20911). The entries below 1.1.0 are Fukami's
+history (Ridge Racer V), kept as it was.
+
+- **Nocturne on the shared runtime:** recompiler configuration and function list (`config/magatama`), a one-command
+  generator from your own ELF (`scripts/magatama_generate.py`), the product build for macOS.
+- **Picture:** widescreen 16:9 / 16:10 / 21:9 / 32:9 with the HUD and text at original proportions; an experimental
+  60 FPS mode that interpolates the camera, characters and demons.
+- **Sound:** the game's own IOP sound drivers on an IOP core (music, effects, movie audio).
+- **iPhone and iPad:** unsigned IPA/TIPA (iOS 16, A12+; legacy iOS 15, A10/A11), universal and landscape only, an
+  on-screen controller, the Metal HUD with the thermal state, a launcher that imports the disc, Quit that closes the app.
+- **Android:** arm64 APK with a Vulkan bridge, a launcher that imports the disc, the on-screen controller, survives
+  going to the background, frame pacing locked to the display's measured refresh rate, a persistent Vulkan pipeline
+  cache, CPU-core selection that suits Snapdragon 865 to 8 Elite.
+- **macOS:** Magatama Launcher.app (import a disc image, then Play).
+- **Linux:** native x86-64 and ARM64 builds from a kit.
+- **Disc import** for `.iso`, `.chd` and `.zso`, verified by the executable's SHA-256 before anything replaces the
+  installed disc.
+
 ## 1.1.0 (2026-10-14)
 
 ### Fukami comes to Windows

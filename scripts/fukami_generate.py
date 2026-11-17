@@ -12,7 +12,7 @@ config/rr5/ (the hashes are not the work; a different ELF or a different generat
 to local/rrv_boot.elf. Needs cmake, a C++20 compiler and network access for the recompiler's pinned
 source dependencies (they are fetched by CMake). It takes several minutes (recompiler build plus a
 1,869-file generation) and writes only under generated/rr5/ and --work (default build/fukami-generate).
-Afterwards: scripts/build_fukami_runtime.sh (see BUILDING.md).
+Afterwards: scripts/build_fukami_runtime.sh (see docs/FUKAMI_BUILDING.md).
 
 In the private repository generated/rr5 is tracked; there the command only verifies it.
 """
@@ -204,7 +204,7 @@ def main() -> int:
         raise
     say(f"OK in {time.time() - started:.0f}s: {summary['file_count']} files, identical to the reference "
         f"(ELF sha256 {summary['elf_sha256'][:16]}...)")
-    say("next: scripts/build_fukami_runtime.sh (see BUILDING.md)")
+    say("next: scripts/build_fukami_runtime.sh (see docs/FUKAMI_BUILDING.md)")
     return 0
 
 

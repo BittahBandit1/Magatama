@@ -1,126 +1,109 @@
-# Building Fukami
+# Building Magatama
 
-You do not need to build anything to play: download a release. This page is for contributors and for anyone who wants
-to build from source. **The repository contains no game code**: you generate it from your own `SLUS_200.02` (step 3).
+**The repository contains no game code.** Everything game-derived is generated from your own `SLUS_209.11` (the
+executable in the root of your Shin Megami Tensei: Nocturne (USA) disc) on your computer, into folders git ignores.
+Never commit, upload or share them.
 
-| Platform | Build |
-|---|---|
-| macOS (Apple silicon) | native, steps 1–6 below |
-| Steam Deck / Linux x86-64 | in a Linux container, [step 7](#7-steam-deck--linux) |
-| Windows x86-64 | release builds available; build steps not documented yet |
+Magatama is a developer preview, and its build still shows its origins: the macOS build uses the PCSX2 GS bridge that a
+[Fukami](https://github.com/danisandoval/fukami) checkout builds, and the folder layout below is the one the scripts
+default to. Every path can be overridden; the scripts' headers list the variables.
+
+```
+~/magatama/
+  runtime/              this repository
+  generated-nocturne/   the translated game code (step 2)
+  disc/                 the disc's files (the launchers import them; SLUS_209.11 at the top)
+  memcard/ logs/        saves and logs of the macOS build
+~/fukami/               a Fukami checkout with its bridge built (macOS only; FUKAMI_DIR overrides)
+```
 
 ## 0. Tools
 
-- **macOS:** Xcode with the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`), CMake ≥ 3.21, Ninja, Python 3.9+,
-  Git, and the libraries PCSX2's bridge links, from Homebrew:
-  `brew install cmake ninja pkgconf python sdl3 rapidyaml freetype jpeg-turbo libpng webp lz4 zstd qt`.
-  (CMake names any other missing package when it configures the bridge.)
-- About 4 GB of free disk space for the dependency checkouts and the builds, and a network connection for the first run
-  (it clones PCSX2 and sse2neon and downloads SDL and the recompiler's pinned libraries).
+- **macOS:** Xcode (with the Metal toolchain and, for iPhone/iPad, the iOS SDK), CMake ≥ 3.21, Ninja, Python 3.9+, Git,
+  and Homebrew's `zstd` plus the libraries listed in [docs/FUKAMI_BUILDING.md](docs/FUKAMI_BUILDING.md#0-tools).
+- **Android:** the Android NDK r28 or newer and an SDK with build-tools and a platform (Linux x86-64 or macOS host);
+  Java for `d8` and `apksigner`.
+- **Linux:** see `scripts/magatama_build_linux.sh --packages` (apt, dnf or pacman).
 
 ## 1. Check the checkout without any game data
 
 ```sh
-cmake --preset m0-macos-arm64
+cmake --preset m0-macos-arm64            # or m0-linux-x86_64
 cmake --build build/m0-macos-arm64 --target rrv-asset-free-tests --parallel
 python3 scripts/qualify_asset_free.py --build-dir build/m0-macos-arm64
 ```
 
-This runs 32 tests, none of which need game data (see [docs/TESTING.md](docs/TESTING.md)). The `m0-` preset names are historical.
-
-## 2. Fetch the pinned dependencies
+## 2. Generate the game code from your ELF
 
 ```sh
-python3 scripts/prepare_dependencies.py --prepare
-python3 scripts/prepare_sdl.py --prepare
-python3 scripts/prepare_dependencies.py --verify
+python3 scripts/magatama_generate.py --elf /path/to/SLUS_209.11
 ```
 
-Revisions and patch hashes are in `config/dependencies.lock.toml` (PS2Recomp is vendored in `third_party/`, so there is nothing to fetch for it). PCSX2 is cloned clean into `build-deps/` and is never
-modified in place: the bridge build applies the ordered series in `tools/patches/pcsx2/` to a private copy.
+This checks the ELF's SHA-256 (only the USA release works), builds the recompiler from `third_party/ps2recomp`, runs it
+with `config/magatama/nocturne-recomp.toml.in` and the function list `config/magatama/nocturne-functions.csv`, writes
+the translated code to `../generated-nocturne`, and lays out `generated/nocturne/` for the build (the ahead-of-time VU
+code, the battle/effect routines the function set leaves out, and the ELF identity the game checks at launch). Re-run
+`scripts/magatama_prepare_generated.py` after any regeneration.
 
-## 3. Generate the game code from your ELF
+## 3. Build
+
+### macOS
+
+Build Fukami's PCSX2 GS bridge in `~/fukami` first ([docs/FUKAMI_BUILDING.md](docs/FUKAMI_BUILDING.md), steps 2 and 4),
+then:
 
 ```sh
-python3 scripts/fukami_generate.py --elf /path/to/SLUS_200.02
+scripts/magatama_build.sh                     # the game: build/magatama/candidate-bin/Fukami
+scripts/magatama_build_launcher_mac.sh        # ~/magatama/Magatama Launcher.app (import a disc image, then Play)
+scripts/magatama_run.sh [disc-folder]         # or run the game straight from the build tree
 ```
 
-`SLUS_200.02` is the boot file of your Ridge Racer V (USA) disc. If you have already started Fukami.app once, it
-unpacked that file to `~/Library/Application Support/Fukami/disc/`, and `--elf` can be left out.
-
-This builds the recompiler from `third_party/ps2recomp`, runs it, generates the ahead-of-time VU code and the hot-function
-file, and writes everything to the ignored directory `generated/rr5/`. It then checks every file against the reference
-hashes in `config/rr5/`: **a different ELF, region or generator version fails**, and nothing half-written is left in place.
-It takes about a minute plus the recompiler build. The generated code is a derivative of the game; never commit it or
-share it (`.gitignore` and the CI gates keep it out of the repository).
-
-## 4. Build the runtime
-
-The runtime build works from a *committed* revision, so commit your changes first (the build never uses a dirty tree).
+### iPhone and iPad
 
 ```sh
-scripts/build_fukami_runtime.sh HEAD fukami-1.0.0 v1
+scripts/magatama_build_ios.sh                          # iOS 16+, A12 or newer
+MAGATAMA_IOS_LEGACY=1 scripts/magatama_build_ios.sh    # iOS 15, A10/A11
 ```
 
-Arguments: the revision, a name for the runtime package (`runtime/<name>`), and a tag for the build directories. It
-builds PCSX2's Metal libraries (first run only), the PCSX2 GS bridge from the pinned source plus the patch series
-(about 10 minutes), then the product (`RRV_BUILD_PRODUCT=ON`, `RRV_PRODUCT_OWNED_SOURCE=ON`: the generated code, the
-override layer and the runtime are compiled in place), and packages and verifies the result. Everything lands in ignored
-directories (`build-*/`, `runtime/`).
+It builds its own static dependencies, the PCSX2 Metal bridge for iOS and the game, and writes an unsigned
+`Magatama-unsigned.ipa` (and a numbered copy in `~/magatama/ios-builds`, with a `.tipa` for TrollStore). The build refuses
+to package an app that allows portrait orientations (Magatama is landscape only on iOS). `MAGATAMA_IOS_SIM=1` builds for the
+Simulator instead.
 
-Where things go: all build products are under **`build/fukami/`** (`metal/`, `root-<commit>/`, `bridge-<tag>-<commit>/` and the
-patched PCSX2 source beside it) plus `runtime/`; the pinned dependency checkouts are `build-deps/` and `runtime-deps/`.
-All are ignored by git and none is shipped (a release takes only the finished libraries out of `runtime/<name>`). The
-`bridge-*-source-*` directory is the exact patched PCSX2 tree that the bridge's provenance manifest records; keep it for as
-long as you keep that bridge. To reclaim space: `rm -rf build/fukami` (the next build redoes the bridge, about 10 minutes).
-
-Environment: `FUKAMI_BUILD_DIR` (replaces `build/fukami`), `FUKAMI_JOBS` (parallel jobs, default 8), `FUKAMI_METAL_RESOURCES` (reuse a Metal-resources directory),
-`FUKAMI_MACOS_TARGET` (the oldest macOS to support; set the same value for the bridge and the product, which this script
-does; without it the build targets the macOS it runs on).
-
-## 5. Make the app
+### Android
 
 ```sh
-python3 scripts/package_fukami_app.py --runtime fukami-1.0.0 --zip
+ANDROID_NDK=/path/to/ndk ANDROID_SDK=/path/to/sdk scripts/magatama_build_android.sh
 ```
 
-Writes `local/app/<VERSION>/Fukami.app` and a zip (the version comes from the `VERSION` file unless `--version` is given).
-The app is signed ad-hoc; it bundles the libraries from Homebrew that the bridge needs and the licence notices. It
-asks for a CHD on first launch like a release does.
+Stages `deps`, `pcsx2`, `bridge`, `product` and `apk` each resume; name one to start there. The APK is debug-signed with
+`~/magatama/android-debug.keystore` (created on first use; `MAGATAMA_ANDROID_KEYSTORE` overrides); keep that file, or a
+new build will not install over an old one. On the device, allow "All files access" when asked: the disc, saves,
+settings and logs live in `Documents/Magatama`.
 
-## 6. Check a change
+### Linux
 
-Run the asset-free suite (step 1). A change that claims to leave the game's behaviour alone must also reproduce, byte for
-byte, what the runtime it replaces does on your own game data: record the per-start RAM digests (`RRV_GATE3_OBSERVE_DIGEST=1`)
-and the semantic trace of a control build and of your build on the same workload, then compare. Details and the rationale
-are in [docs/TESTING.md](docs/TESTING.md). Run at most two game instances at once.
+`scripts/magatama_linux_kit.sh` packs this checkout and the generated code on a Mac; `scripts/magatama_build_linux.sh`
+builds it natively on the Linux machine (x86-64 or ARM64) and `scripts/magatama_run_linux.sh` runs it.
 
-## 7. Steam Deck / Linux
+## 4. Check a change
 
-The Linux build runs in a container so that the result runs on SteamOS (Ubuntu 24.04 userland, glibc 2.39). It needs Docker
-and, on Apple silicon, Rosetta emulation for `linux/amd64` (the bridge takes about 25 minutes).
-
-```sh
-docker build --platform linux/amd64 -t rrv-linux-build:1 tools/linux-build        # once; builds PCSX2's dependencies
-tools/linux-build/build_linux_runtime.sh HEAD fukami-1.0.0-linux-x86_64          # bridge, product, runtime
-docker run --rm --platform linux/amd64 -v "$PWD":"$PWD" -w "$PWD" -e HOME=/tmp/rrv-home rrv-linux-build:1 \
-    python3 scripts/package_fukami_linux.py --runtime fukami-1.0.0-linux-x86_64
-```
-
-The package is `local/app/<VERSION>-linux/Fukami-<VERSION>-linux-x86_64.tar.gz`: the app, its libraries, `install.sh`
-and the Steam Deck defaults. Do steps 2–3 on the host first (the container sees the same checkout).
+Run the asset-free suite (step 1). For anything that touches timing, rendering or the runtime, say in the pull request
+what you ran on your own game data and what you compared it against ([docs/TESTING.md](docs/TESTING.md)).
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/product`, `src/app` | override layer (all game-behaviour changes), the app (disc extraction, settings, menu) |
+| `src/product` | the override layer: every change to how the game behaves (Nocturne and Ridge Racer V) |
+| `src/app` | settings and menu, disc import (`magatama_disc_import.*`), the iOS and Android app shells |
+| `src/launcher` | the SwiftUI launchers for macOS and iOS (Android's is `src/app/android/dev/magatama/LauncherActivity.java`) |
+| `src/host` | window, input, touch controller, presentation |
+| `src/audio`, `third_party/dq8-iop` | sound: the IOP core that runs the game's own sound drivers |
 | `third_party/ps2recomp` | recompiler, analyzer and runtime (PS2Recomp-derived; `RRV_CHANGES.md`) |
-| `src/guest-time`, `src/vu-aot`, `src/gs-backend`, `src/audio`, `src/hle` | guest time, VU code, GS ABI, audio, kernel services |
-| `tools/pcsx2-gs-bridge`, `tools/pcsx2-spu2`, `tools/patches/pcsx2` | the PCSX2 bridge and its patch series |
-| `tools/vu-aot`, `tools/ee-native` | generators for the VU code and the hot functions |
-| `config/` | recompiler config, dependency lock, reference hashes (`rr5/`), product workload (`product/`) |
-| `generated/` | **local only**: output of `fukami_generate.py` |
-| `scripts/`, `cmake/`, `tests/` | build, packaging and test tooling |
+| `tools/pcsx2-gs-bridge`, `tools/patches` | the PCSX2 bridge and its patches (`ios/`, `android/`, `mobile/` for the ports) |
+| `config/magatama` | recompiler configuration and function list for Nocturne, the product workload |
+| `generated/` | **local only**: generated from your ELF |
 
-Architecture and invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The Ridge Racer V side of the shared runtime is documented in [docs/FUKAMI.md](docs/FUKAMI.md) and
+[docs/FUKAMI_BUILDING.md](docs/FUKAMI_BUILDING.md).

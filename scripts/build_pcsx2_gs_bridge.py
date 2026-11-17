@@ -7,7 +7,7 @@ patches (the assembled target series, then the Windows stack of config/dependenc
 `rrv-pcsx2-gs-bridge`, stage the dependency DLLs beside it and write the source- and build-bound manifest that
 cmake/RrvProduct.cmake verifies.
 
-Run from a shell that has run vcvars64 (clang-cl, cmake, ninja, git and python on PATH; BUILDING.md), after
+Run from a shell that has run vcvars64 (clang-cl, cmake, ninja, git and python on PATH; docs/FUKAMI_BUILDING.md), after
     python scripts/prepare_dependencies.py --prepare --component pcsx2
     python scripts/build_pcsx2_windows_deps.py
 

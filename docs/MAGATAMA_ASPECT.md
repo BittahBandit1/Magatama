@@ -4,8 +4,6 @@ The save/load glyphs now retain their original proportions in widescreen. The cl
 
 The rebuilt21:9 load-menu/completion captures are corrected; two matched battle captures remain byte-identical. The final4:3 run has all four captures byte-identical to its control. 1,864 packet checks and5,214 actual-trace checks pass under sanitizers. The normal binary is ready, with user saves and preferences unchanged. Historical pending-build notes below are superseded for these specific scenes; this does not claim every menu/effect throughout the game.
 
-Proof: ~/Documents/Codex/2026-10-22/i-x20/outputs/magatama-text-aspect-20261029/final-report.md.
-
 Normal launch honors saved aspect/preferences, with no rebuild required:
 ```sh
 cd ~/magatama/runtime && MAGATAMA_SOUND_NATIVE=1 scripts/magatama_run.sh
@@ -70,7 +68,7 @@ python3 scripts/magatama_test_aspect.py --regressions
 
 Packet fixtures can be compiled into a temporary directory with `clang++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -I src/gs-backend tests/nocturne_aspect_packets_test.cpp -o /tmp/magatama-aspect-packets`, then run that executable with selected read-only `.gs` trace paths as arguments. The trace list and per-trace counts are in `aspect-packet-final-tests.log`.
 
-Proof index: `~/Documents/Codex/2026-10-22/i-x20/outputs/magatama-aspect-20261027/aspect-proof-index.json`. Test logs remain under the neighboring `magatama-20261027` output directory. No before/after screenshots are claimed.
+No before/after screenshots are claimed.
 
 ## First in-game checks
 

@@ -1,44 +1,44 @@
 name: Bug report
-description: Something does not work (a crash, a visual problem, bad performance, an install problem)
+description: Something does not work (a crash, a visual or sound problem, bad performance, a build problem)
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        **Do not attach or link game files** (disc images, ELF/IRX, extracted assets, captures). Issues that do are removed.
-        Logs from Fukami's `sessions/` folder are fine.
+        **Do not attach or link game files** (disc images, ELF/IRX, extracted assets, captures, RAM dumps, generated code). Issues that do are removed.
+        Run logs (`logs/run-*.log`) are fine.
   - type: input
     id: version
     attributes:
-      label: Fukami version
-      description: As in the release name or the app's About box.
+      label: Magatama revision or build
+      description: The commit you built, or the build number (iOS/Android builds show it in the log's first line).
     validations: {required: true}
   - type: dropdown
     id: platform
     attributes:
       label: Platform
-      options: [macOS (Apple silicon), Steam Deck (SteamOS), Other Linux x86-64]
+      options: [macOS (Apple silicon), iPhone, iPad, Android, Linux x86-64, Linux ARM64]
     validations: {required: true}
   - type: input
     id: system
     attributes:
-      label: Hardware and OS version
-      placeholder: "MacBook Air M2, macOS 15.2  /  Steam Deck OLED, SteamOS 3.7"
+      label: Device and OS version
+      placeholder: "MacBook Pro M3, macOS 26.1  /  iPad Air M3, iPadOS 26  /  Retroid Pocket 5, Android 13"
     validations: {required: true}
   - type: textarea
     id: what
     attributes:
       label: What happened, and what did you expect?
-      description: Steps to reproduce; where in the game (menu, which track and car, which mode).
+      description: Steps to reproduce, and where in the game (area, battle, menu, movie).
     validations: {required: true}
   - type: textarea
     id: settings
     attributes:
       label: Non-default settings
-      description: Scale, ratio, car LOD, draw distance, anything you changed from the defaults.
+      description: Internal resolution, aspect ratio, 60 FPS mode, anything you changed from the defaults.
   - type: textarea
     id: log
     attributes:
       label: Log
-      description: Paste the end of the newest log in `sessions/` (menu → Show logs), or attach it.
+      description: Paste the end of the newest run log (macOS ~/magatama/logs, iOS the app's logs folder in Files, Android Documents/Magatama/logs), or attach it.
       render: text

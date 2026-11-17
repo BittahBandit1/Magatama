@@ -7,7 +7,7 @@ no Qt, KDDockWidgets, FFmpeg or Agility SDK (the bridge is Vulkan-only, has no U
 versions and the same CMake options as that script, built with the MSVC compiler it uses. Sources are downloaded from
 the URLs pinned in config/dependencies.lock.toml ([[pcsx2_windows_source]]) and refused unless their SHA-256 matches.
 
-Run from a shell that has run vcvars64 (cl, cmake, ninja and python on PATH; BUILDING.md):
+Run from a shell that has run vcvars64 (cl, cmake, ninja and python on PATH; docs/FUKAMI_BUILDING.md):
 
     python scripts/build_pcsx2_windows_deps.py
 

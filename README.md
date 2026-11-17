@@ -1,92 +1,68 @@
-# Fukami
+# Magatama
 
-**Fukami** is a native port of **Ridge Racer V** (PlayStation 2, USA, `SLUS-20002`) for Windows, macOS (Apple silicon) and
-Linux (Steam Deck), made by static recompilation: the game's MIPS code is translated ahead of time into C++ and
-compiled into a normal application, with a PS2 hardware layer (the GS from [PCSX2](https://pcsx2.net/)) underneath.
-It is **not an emulator** and it cannot run any other game.
+**Magatama** is a native port of **Shin Megami Tensei: Nocturne** (PlayStation 2, USA, `SLUS-20911`) made by static
+recompilation. The game's MIPS code is translated ahead of time into C++ on your own computer, from your own disc, and
+compiled into a normal application for macOS, iPhone and iPad, Android and Linux, with a PS2 hardware layer (the GS from
+[PCSX2](https://pcsx2.net/)) underneath. It is **not an emulator** and it runs no other game.
 
-> **This repository and its releases contain no game data.** You need your own copy of Ridge Racer V (USA),
-> dumped from a disc you own. Fukami is not affiliated with, authorised or endorsed by Bandai Namco or Sony.
+Magatama is built on [Fukami](https://github.com/danisandoval/fukami), the Ridge Racer V port, and shares its runtime.
+
+> **This repository contains no game code and no game data.** You need your own copy of Shin Megami Tensei: Nocturne
+> (USA), dumped from a disc you own. Magatama is not affiliated with, authorised or endorsed by Atlus, Sega or Sony.
 > See [LEGAL.md](LEGAL.md).
+
+> **Status: work in progress.** Much of the game plays, but Magatama is a developer preview: there are no official
+> releases yet, you build it yourself, and you will find bugs.
 
 ## Features
 
-- Native 60 fps progressive output; the game's logic still sees the exact PS2 timing.
-- Internal resolution up to 8x, PCSX2 anti-aliasing emulation, FXAA, CAS sharpening, anisotropic filtering, mipmaps.
-- **Real widescreen** (16:9, 16:10, 21:9): the game's camera renders a wider view, not a stretched picture. The
-  intro fills the wide screen in its own view.
-- Optional enhancements: more cars at full detail (car LOD), longer draw distance, faster loading.
-- Controller support (SDL game controllers, rumble) and keyboard; in-game settings menu (Esc / F1 / Guide button).
-- Saves to a real memory-card file, safe against power loss.
-- No JIT anywhere: the VU microcode and hot functions are compiled ahead of time, so it runs on platforms that
-  forbid run-time code generation.
+- Native code: the game logic runs as compiled ARM64 or x86-64 code, with no JIT, so it also runs where run-time code
+  generation is forbidden (iOS).
+- Internal resolution up to 8x, FXAA, CAS sharpening, anisotropic filtering.
+- Widescreen: 16:9, 16:10, 21:9 and 32:9 views, with the HUD, menus and text kept at their original proportions.
+- 60 FPS mode (experimental): the camera, characters and demons are interpolated between the game's 30 FPS frames.
+- The game's own sound drivers, run on an IOP core, for music, effects and movie audio.
+- Controllers and keyboard everywhere; an on-screen controller on iPhone, iPad and Android that hides itself while a
+  controller is connected.
+- An in-game settings menu (Esc, F1, the controller's Guide button or a three-finger tap).
+- Launchers for macOS, iOS and Android that import your disc image (`.iso`, `.chd` or `.zso`) and check it is the
+  right one (SHA-256 of `SLUS_209.11`) before anything is copied.
+- Fast-forward and a free camera on the right stick.
 
-## Requirements
+## Platforms
 
-| | |
+| Platform | Status |
 |---|---|
-| **Windows** | Windows 10 or 11, x86-64, a GPU with Direct3D 11 or Vulkan, and the Microsoft Visual C++ Redistributable (x64). |
-| **macOS** | Apple silicon (M1 or later); the minimum macOS version is in each release's notes. |
-| **Steam Deck / SteamOS** | SteamOS 3.7 or later. Other Linux x86-64 distributions are untested. |
-| **Game** | Ridge Racer V (USA) as a **CHD** file (or a `.cue`/`.bin` pair) made from your own disc. About 500 MB of free disk space. |
+| **macOS** (Apple silicon) | Main development platform. Built with `scripts/magatama_build.sh`; started with the Magatama Launcher app or `scripts/magatama_run.sh`. |
+| **iPhone and iPad** | Unsigned `.ipa` / `.tipa` for sideloading or TrollStore. iOS 16 or later on A12 or newer; a legacy build covers iOS 15 on A10/A11 (iPhone 7/8/X, iPod touch 7). Landscape only. |
+| **Android** | arm64 APK, Android 9 or later, Vulkan. Tested on Snapdragon (Adreno) handhelds; Mali GPUs are not supported yet. Works on 60 Hz and 120 Hz screens. |
+| **Linux** (x86-64, ARM64) | Native build from a kit (`scripts/magatama_build_linux.sh`); less tested. |
+| **Windows** | Not yet. |
 
-## Install
+## Getting started
 
-Download the latest build from the [Releases](https://github.com/danisandoval/fukami/releases) page (and only from there):
+There are no prebuilt downloads yet. To build Magatama you need your own `SLUS_209.11` (the executable in the root of
+the disc); everything game-derived is generated from it on your computer. See [BUILDING.md](BUILDING.md).
 
-- **Windows:** unzip `Fukami-<version>-windows-x86_64.zip` anywhere and run **Fukami.exe**. Settings and saves go to
-  `%LOCALAPPDATA%\Fukami`.
-- **macOS:** unzip `Fukami-<version>-macos-arm64.zip`, move **Fukami** to Applications, then right-click it and choose
-  **Open** the first time (the app is not notarised yet).
-- **Steam Deck:** in Desktop Mode, extract `Fukami-<version>-linux-x86_64.tar.gz` and run `./install.sh`; it adds
-  Fukami to Steam. [Step-by-step guide](docs/USER_GUIDE.md#steam-deck).
-
-On first launch Fukami asks for your CHD or `.cue` file, checks that it is the USA disc, and unpacks the game files once into its
-own folder. Full instructions, controls and settings are in the [user guide](docs/USER_GUIDE.md).
-
-### Getting your CHD
-
-A `.cue`/`.bin` dump works directly: pick the `.cue` (keep the `.bin` beside it). Otherwise dump your own Ridge Racer V (USA) disc to an image with any standard tool, then convert it with `chdman`
-(part of MAME): `chdman createcd -i RidgeRacerV.cue -o RidgeRacerV.chd`. The project cannot help with finding
-game files and will not link to them.
-
-## Known issues
-
-- Only the USA release is supported (`SLUS_200.02`; the app checks the disc's SHA-256 hashes).
-- A long live session with many cars on screen stalled in one early test (a replay of the same session ran fine);
-  the cause is not identified yet.
-- Steam Deck: the first 10-15 seconds of a race (the start area) can dip below 60 fps, mostly with scenery draw distance above 0 (the default). The start sections draw many more course strips than the rest of the lap; this is the game's own data, not a setting you can fix.
-- No in-game controller remapping yet; the default layout is in the user guide.
-- Audio is verified by listening and by measured tests, not by a full hardware comparison.
-- Widescreen HUD (`hud=fixed` or `race`): on the RETIRE result screen the RETRY / QUIT GP menu is drawn about 80 px to the left for its first visible frame.
-
-More in the release notes and on the [issue tracker](https://github.com/danisandoval/fukami/issues).
-
-## Building from source
-
-The repository holds the tooling and the runtime; the game code is **generated from your own ELF** by
-`scripts/fukami_generate.py` and never committed. See [BUILDING.md](BUILDING.md). How it fits together is in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); how we check changes is in [docs/TESTING.md](docs/TESTING.md).
+Once built, the launcher's **Import Disc** button takes your disc image. On iPhone and iPad the disc, saves, settings
+and logs are in the app's folder in the Files app; on Android they are in `Documents/Magatama`.
 
 ## Contributing
 
-Issues and pull requests are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first. We do not accept game assets,
-copyrighted material, help with piracy, or copy-protection work.
+Bug reports and pull requests are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first. Never attach, upload or link
+game files (disc images, the ELF, extracted assets, the generated code).
 
-## Credits
+## Credits and licence
 
-Fukami builds on the work of many people and projects:
+Magatama is free software under the GNU General Public License v3.0 ([LICENSE](LICENSE)). It stands on:
 
-- [PCSX2](https://github.com/PCSX2/pcsx2) (GPL-3.0+): the GS renderer and SPU2 core.
-- [PS2Recomp](https://github.com/ran-j/PS2Recomp) by ran-j (GPL-3.0): the recompiler and runtime this project started from.
-- [SDL](https://libsdl.org/), [libchdr](https://github.com/rtissera/libchdr), [sse2neon](https://github.com/DLTcollab/sse2neon),
-  [Dear ImGui](https://github.com/ocornut/imgui) and the other libraries listed in
-  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- The recompilation community, whose public projects ([N64Recomp](https://github.com/N64Recomp/N64Recomp),
-  [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) and others) were a big inspiration for this project.
+- [Fukami](https://github.com/danisandoval/fukami) by Dani Sandoval: the runtime, the PCSX2 GS bridge, the app, the
+  tooling and the documentation this project grew from ([docs/FUKAMI.md](docs/FUKAMI.md)).
+- [PS2Recomp](https://github.com/ran-j/PS2Recomp) by ran-j: the recompiler and runtime.
+- [PCSX2](https://pcsx2.net/): the GS renderer and SPU2 core.
+- The IOP core from [Sinan Karakaya's PS2Recomp fork](https://github.com/Sinan-Karakaya/PS2Recomp) (as pinned by
+  DQ8-Recompiled), which runs the game's own sound drivers (`third_party/dq8-iop`).
+- [SDL](https://libsdl.org/) and the other libraries in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## Licence
-
-Fukami is released under the **GNU General Public License v3.0** ([LICENSE](LICENSE)). PCSX2-derived code
-keeps its upstream notices. The licence covers this project's source code only; Ridge Racer V is the property of its
-owners.
+*Shin Megami Tensei* and *Nocturne* are trademarks of Atlus / Sega; *PlayStation* is a trademark of Sony Interactive
+Entertainment. They are used only to say which game this software works with.

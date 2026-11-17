@@ -12,8 +12,8 @@ The locked USA executable contains complete implementations:
   completion progression, including all original float operations and branches.
 
 Neither entry nor body was emitted in the current generated function set. The
-surrounding routines end at these exact addresses. `src/product/nocturne_bezier.cpp`
-contains selective translations generated with the product's own vendored
+surrounding routines end at these exact addresses. `generated/nocturne/effects/nocturne_bezier.cpp`
+(made from your own ELF, never committed) contains selective translations generated with the product's own vendored
 R5900Decoder and CodeGenerator, with runtime checkpoints, exact instruction
 accounting and branch delay slots. Product patches register only missing entries.
 These are full original functions, not skipped effects or stub success results.

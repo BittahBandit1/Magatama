@@ -86,7 +86,14 @@ if(WIN32)
 endif()
 add_dependencies(Fukami rrv-resource-package-producer)
 if(MAGATAMA_GAME)
-    target_sources(Fukami PRIVATE "${CMAKE_SOURCE_DIR}/src/product/nocturne_bezier.cpp")
+    # Original battle/effect/AI routines the recompiler's function set leaves out, translated from the user's own ELF
+    # like the rest of the game code (scripts/magatama_generate_bezier.py; never committed: generated/ is ignored).
+    set(MAGATAMA_EFFECTS_SOURCE "${CMAKE_SOURCE_DIR}/generated/nocturne/effects/nocturne_bezier.cpp")
+    if(NOT EXISTS "${MAGATAMA_EFFECTS_SOURCE}")
+        message(FATAL_ERROR "Missing ${MAGATAMA_EFFECTS_SOURCE}: run scripts/magatama_prepare_generated.py "
+                            "(or scripts/magatama_generate_bezier.py) with your own SLUS_209.11 first.")
+    endif()
+    target_sources(Fukami PRIVATE "${MAGATAMA_EFFECTS_SOURCE}")
 endif()
 
 # Gate 8 audio: PCSX2 SPU2 core (tools/pcsx2-spu2) and the host rewrite of RR5's IOP sound

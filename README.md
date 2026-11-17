@@ -29,7 +29,7 @@ Magatama is built on [Fukami](https://github.com/danisandoval/fukami), the Ridge
   right one (SHA-256 of `SLUS_209.11`) before anything is copied.
 - Right Analog Stick controls the camera, enabled with an R3 click.
 
-## Performance and Compatibility
+## Performance & Compatibility
 
 Performance and compatibility has been tested on many pieces of hardware. For iOS, the minimum for sustained 30 FPS is the A15 Bionic. 
 On macOS, the minimum is A18 Pro or M1. Android minimum is Snapdragon 865. Adreno GPU is a requirement. 
@@ -53,10 +53,24 @@ the disc); everything game-derived is generated from it on your computer. See [B
 Once built, the launcher's **Import Disc** button takes your disc image. On iPhone and iPad the disc, saves, settings
 and logs are in the app's folder in the Files app; on Android they are in `Documents/Magatama`.
 
+## Known Issues & General Notes
+• In rare cases, the interpolation does not properly apply upon startup. Many animations still update at 30 frames per second in this glitched state. Reboot the game to fix.
+• Button prompts are PlayStation only. In the future, Nintendo Switch and Xbox button prompts will be human-drawn and added into the game.
+• On macOS specifically, there is a small chance that the transition to your first battle upon bootup will slightly stutter.
+• In order to comply with copyright law, the launchers build the necessary code before the first runtime. This process can take a long time.
+• While Linux and Windows support is baked into the project via Fukami, zero work has been done to make those versions functional by me.
+Bug reports are welcome, but do not expect support for fixing any issues if you build those versions from source.
+• This project as a whole is still experimental. Expect bugs and crashes. Save frequently when possible.
+• Interpolation is currently limited to 60 FPS. This limit will be rectified in the future.
+• The "Legacy" iOS version is moreso meant for powerful devices on older iOSes, not old processors.
+The game will boot on A10 Bionic, but performance is unplayably slow.
+
 ## Contributing
 
 Bug reports and pull requests are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first. Never attach, upload or link
 game files (disc images, the ELF, extracted assets, the generated code).
+
+For bug reports, please try to include a screenshot or video displaying the problem. Be sure to include your OS and hardware specs as well.
 
 ## Credits and licence
 

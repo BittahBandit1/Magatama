@@ -1,0 +1,168 @@
+--- a/bridge.cpp	2026-11-10 12:47:16.694816859 -0600
++++ b/bridge.cpp	2026-11-10 13:19:14.174612458 -0600
+@@ -3751,6 +3751,154 @@
+ #endif
+ }
+ 
++#if defined(__ANDROID__)
++// Android surface lifecycle. Android takes the window surface away when the app goes to the background (Home, the app
++// switcher, the screen turning off) and hands a new one back on return. The GS owner presents on its own thread, so
++// without this it kept presenting into the destroyed surface and PCSX2's "surface lost" recovery then built a Vulkan
++// surface from the freed window (SIGSEGV in vkCreateAndroidSurfaceKHR).
++//
++// The activity (dev.magatama.MagatamaActivity, through libmain's JNI) reports both edges from the UI thread:
++//   surface_lost  - before SDL lets go of the window; waits (bounded) until the GS owner has dropped its swap chain.
++//   surface_ready - with the new window; the owner rebuilds its surface on it at the next field.
++// Between the two the owner holds at its next field transition, which pauses the game in the background. The bridge
++// keeps its own reference on the window it presents to, so a late owner never touches a freed window.
++#include <android/native_window.h>
++#include <condition_variable>
++#include "pcsx2/GS/Renderers/Vulkan/VKShaderCache.h"
++namespace {
++struct AndroidSurfaceGate
++{
++    std::mutex mutex;
++    std::condition_variable changed;
++    bool live = false;      // the owner has run a field: surfaces are the gate's from here on
++    bool lost = false;      // the activity has no surface
++    bool detached = false;  // the owner has dropped its swap chain
++    bool reattach = false;  // a new window waits in pending
++    ANativeWindow* held = nullptr;    // the window the swap chain was made on (referenced)
++    ANativeWindow* pending = nullptr; // the activity's new window (referenced)
++    uint32_t width = 0, height = 0;
++};
++AndroidSurfaceGate& SurfaceGate()
++{
++    static AndroidSurfaceGate gate;
++    return gate;
++}
++
++// PCSX2 writes its Vulkan pipeline cache only when the device is destroyed, and an Android app is killed rather than
++// shut down: every session compiled its pipelines again, a hitch of up to ~100 ms the first time each new one was
++// needed (a turn of the camera, a new character). Write it when the app goes to the background, and every 20 s
++// while new pipelines are being made (FlushPipelineCache does nothing while nothing changed).
++void FlushVulkanPipelines(bool now)
++{
++    static std::chrono::steady_clock::time_point last{};
++    const auto t = std::chrono::steady_clock::now();
++    if (!now && t - last < std::chrono::seconds(20))
++        return;
++    last = t;
++    if (g_vulkan_shader_cache)
++        g_vulkan_shader_cache->FlushPipelineCache();
++}
++
++// The GS owner, at the start of each field transition.
++void ServiceAndroidSurface()
++{
++    FlushVulkanPipelines(false);
++    AndroidSurfaceGate& gate = SurfaceGate();
++    std::unique_lock<std::mutex> lock(gate.mutex);
++    if (!gate.live)
++    {
++        gate.live = true;
++        if (std::optional<WindowInfo> info = Host::AcquireRenderWindow(false);
++            info && info->type == WindowInfo::Type::Android && info->window_handle)
++        {
++            gate.held = static_cast<ANativeWindow*>(info->window_handle);
++            ANativeWindow_acquire(gate.held);
++        }
++    }
++    if (gate.lost)
++    {
++        if (!gate.detached)
++        {
++            if (g_gs_device)
++                g_gs_device->DestroySurface();
++            FlushVulkanPipelines(true);
++            gate.detached = true;
++            gate.changed.notify_all();
++            std::fprintf(stderr, "[pcsx2-gs-bridge] android: surface lost, presentation paused\n");
++        }
++        gate.changed.wait(lock, [&gate] { return !gate.lost; });
++    }
++    if (gate.reattach)
++    {
++        gate.reattach = false;
++        ANativeWindow* window = gate.pending;
++        const uint32_t width = gate.width, height = gate.height;
++        gate.pending = nullptr;
++        lock.unlock();
++        char error[256] = {};
++        bool ok = rrv_pcsx2_gs_bridge_configure_native_surface(RRV_PCSX2_GS_SURFACE_ANDROID,
++                      RRV_PCSX2_GS_SURFACE_FLAG_CALLER_OWNS_HANDLES, window, window, width, height, 1.0f, error,
++                      sizeof error) != 0;
++        if (ok && g_gs_device)
++        {
++            ok = g_gs_device->UpdateWindow();
++            ImGuiManager::WindowResized();
++        }
++        std::fprintf(stderr, "[pcsx2-gs-bridge] android: new surface %ux%u %s%s\n", width, height,
++                     ok ? "attached" : "failed: ", ok ? "" : error);
++        lock.lock();
++        if (gate.held)
++            ANativeWindow_release(gate.held);
++        gate.held = window;
++        gate.detached = false;
++    }
++}
++} // namespace
++
++// The display's measured frame period (ns; 0 until known), for the game's real-time pacer (GSDeviceVK.cpp,
++// RrvAndroidPacePresent; the product reads it through rrv_set_display_period_source).
++extern std::atomic<u64> g_rrv_display_frame_ns;
++extern "C" RRV_PCSX2_GS_BRIDGE_API uint64_t rrv_pcsx2_gs_bridge_display_frame_ns(void)
++{
++    return ::g_rrv_display_frame_ns.load(std::memory_order_relaxed);
++}
++
++extern "C" RRV_PCSX2_GS_BRIDGE_API void rrv_pcsx2_gs_bridge_android_surface_lost(void)
++{
++    AndroidSurfaceGate& gate = SurfaceGate();
++    std::unique_lock<std::mutex> lock(gate.mutex);
++    if (!gate.live)
++        return;
++    gate.lost = true;
++    gate.detached = false;
++    gate.changed.notify_all();
++    // The owner reaches a field transition within a refresh or two while the game runs; if it is parked elsewhere
++    // the window stays referenced and it detaches at its next field.
++    gate.changed.wait_for(lock, std::chrono::milliseconds(1500), [&gate] { return gate.detached; });
++}
++
++extern "C" RRV_PCSX2_GS_BRIDGE_API void rrv_pcsx2_gs_bridge_android_surface_ready(
++    void* window, uint32_t width, uint32_t height)
++{
++    AndroidSurfaceGate& gate = SurfaceGate();
++    std::lock_guard<std::mutex> lock(gate.mutex);
++    if (!gate.live || !window || width == 0u || height == 0u)
++        return;
++    ANativeWindow* native = static_cast<ANativeWindow*>(window);
++    if (!gate.lost && native == gate.held)
++        return; // a resize of the current surface: the presentation path handles that
++    ANativeWindow_acquire(native);
++    if (gate.pending)
++        ANativeWindow_release(gate.pending);
++    gate.pending = native;
++    gate.width = width;
++    gate.height = height;
++    gate.reattach = true;
++    gate.lost = false;
++    gate.changed.notify_all();
++}
++#endif
++
+ extern "C" int rrv_pcsx2_gs_bridge_vsync(
+     RrvPcsx2GsBridge* bridge, const RrvPcsx2GsPrivRegs regs,
+     uint64_t field_index, uint32_t field_parity, char* error, uint32_t error_capacity)
+@@ -3766,6 +3914,10 @@
+         SetError(error, error_capacity, "field parity must be 0 or 1 (got %u)", field_parity);
+         return 0;
+     }
++#if defined(__ANDROID__)
++    if (bridge->direct_present)
++        ServiceAndroidSurface();
++#endif
+     if (!bridge->original_plan.matches(field_index))
+     {
+         SetError(error,error_capacity,"Original presentation plan belongs to another field");

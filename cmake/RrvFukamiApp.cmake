@@ -30,6 +30,18 @@ if(TARGET rrv-product)
         set_source_files_properties("${CMAKE_SOURCE_DIR}/src/app/magatama_ios.mm" PROPERTIES
             COMPILE_OPTIONS "-fobjc-arc")
         target_link_libraries(rrv-product PRIVATE rrv_fukami_settings "-framework UIKit" "-framework Foundation")
+        # The disc importer and the Swift launcher (compiled by scripts/magatama_build_ios.sh into
+        # MAGATAMA_IOS_LAUNCHER_OBJECT; its Swift runtime search paths in MAGATAMA_IOS_SWIFT_LINK).
+        target_sources(rrv-product PRIVATE "${CMAKE_SOURCE_DIR}/src/app/magatama_disc_import.cpp")
+        if(MAGATAMA_IOS_LAUNCHER_OBJECT)
+            target_sources(rrv-product PRIVATE "${MAGATAMA_IOS_LAUNCHER_OBJECT}")
+            set_source_files_properties("${MAGATAMA_IOS_LAUNCHER_OBJECT}" PROPERTIES EXTERNAL_OBJECT TRUE
+                GENERATED TRUE)
+            target_compile_definitions(rrv-product PRIVATE MAGATAMA_IOS_LAUNCHER=1)
+            separate_arguments(_magatama_swift_link UNIX_COMMAND "${MAGATAMA_IOS_SWIFT_LINK}")
+            target_link_options(rrv-product PRIVATE ${_magatama_swift_link})
+            target_link_libraries(rrv-product PRIVATE "-framework SwiftUI" "-framework UniformTypeIdentifiers")
+        endif()
         if(TARGET rrv-disc-extract)
             target_link_libraries(rrv-product PRIVATE rrv-disc-extract)
         endif()

@@ -20,6 +20,8 @@
 	<key>UIRequiresFullScreen</key><true/>
 	<key>UIStatusBarHidden</key><true/>
 	<key>UIViewControllerBasedStatusBarAppearance</key><false/>
+	<!-- RULE: Magatama runs landscape only on iPhone and iPad (CONTRIBUTING.md, "Hard rules"). Both lists hold only
+	     the two landscape orientations; scripts/magatama_build_ios.sh fails the build if either allows portrait. -->
 	<key>UISupportedInterfaceOrientations</key>
 	<array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
 	<key>UISupportedInterfaceOrientations~ipad</key>

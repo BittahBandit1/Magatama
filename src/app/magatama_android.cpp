@@ -17,9 +17,11 @@
 #include <SDL.h>
 
 #include <android/log.h>
+#include <android/native_window_jni.h>
 #include <jni.h>
 
 #include <cerrno>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -275,6 +277,11 @@ struct Activity
             }
         return path;
     }
+    float displayRefreshRate()
+    {
+        jmethodID id = method("magatamaDisplayRefreshRate", "()F");
+        return id ? env->CallFloatMethod(self, id) : 0.0f;
+    }
     ~Activity()
     {
         if (env && self)
@@ -309,6 +316,41 @@ std::filesystem::path defaultIniPath() { return {}; }
 void restart() {} // Android: close and reopen the app; settings apply on the next launch
 void reveal(const std::filesystem::path &) {}
 } // namespace fukami::app
+
+// Surface lifecycle (MagatamaActivity.GameSurface, UI thread): forwarded to the GS bridge, which presents on its own
+// thread and must let go of the window before Android destroys it (tools/patches/android/bridge-android-surface.diff).
+namespace {
+void *bridgeSymbol(const char *name)
+{
+    void *bridge = dlopen("librrv-pcsx2-gs-bridge.so", RTLD_NOW | RTLD_NOLOAD);
+    void *symbol = bridge ? dlsym(bridge, name) : nullptr;
+    if (bridge)
+        dlclose(bridge); // RTLD_NOLOAD took a reference; the game's own handle keeps it loaded
+    return symbol;
+}
+} // namespace
+
+extern "C" JNIEXPORT void JNICALL Java_dev_magatama_MagatamaActivity_nativeSurfaceLost(JNIEnv *, jclass)
+{
+    using Fn = void (*)();
+    if (auto fn = reinterpret_cast<Fn>(bridgeSymbol("rrv_pcsx2_gs_bridge_android_surface_lost")))
+        fn();
+}
+
+extern "C" JNIEXPORT void JNICALL Java_dev_magatama_MagatamaActivity_nativeSurfaceReady(JNIEnv *env, jclass,
+                                                                                    jobject surface, jint width,
+                                                                                    jint height)
+{
+    using Fn = void (*)(void *, uint32_t, uint32_t);
+    auto fn = reinterpret_cast<Fn>(bridgeSymbol("rrv_pcsx2_gs_bridge_android_surface_ready"));
+    if (!fn || !surface || width <= 0 || height <= 0)
+        return;
+    ANativeWindow *window = ANativeWindow_fromSurface(env, surface);
+    if (!window)
+        return;
+    fn(window, static_cast<uint32_t>(width), static_cast<uint32_t>(height)); // the bridge takes its own reference
+    ANativeWindow_release(window);
+}
 
 extern "C" __attribute__((visibility("default"))) int SDL_main(int, char **)
 {
@@ -377,6 +419,17 @@ extern "C" __attribute__((visibility("default"))) int SDL_main(int, char **)
     def("RRV_GATE3_LIVE_PAD", "1");
     def("RRV_GIF_PATH_LATENCY", "0");
     def("RRV_GATE3_REALTIME", "1");
+    {
+        // A 60, 120 or 240 Hz screen (most Android devices): the game runs at exactly 60.00 so its frames stay on the
+        // display's grid (gate3_temporal_runtime.inc, RRV_GATE3_DISPLAY_RATE_60). Measured on the Nova at 120 Hz: at
+        // 59.94 one frame in every 2-4 s stayed up a refresh longer. Other rates (90, 144 Hz) keep 59.94.
+        const float hz = activity.displayRefreshRate();
+        const float multiple = hz / 60.0f;
+        const bool even = hz > 0.0f && std::fabs(multiple - std::round(multiple)) < 0.01f && std::round(multiple) >= 1.0f;
+        std::fprintf(stderr, "[android] display %.2f Hz%s\n", hz, even ? ": the game runs at 60.00" : "");
+        if (even)
+            def("RRV_GATE3_DISPLAY_RATE_60", "1");
+    }
     def("MAGATAMA_SILENT_SOUND", "1");
     def("MAGATAMA_SOUND", "1");
     def("MAGATAMA_SOUND_NATIVE", "1"); // the original IOP sound modules: music, effects and movie audio

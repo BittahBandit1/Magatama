@@ -210,11 +210,19 @@ extern "C" int rrv_fast_forward_active(void){return g_rrvFastForward.load(std::m
 // last released (its work for the field, waits on the GS/VU pipeline included); the pacer's own sleep is not work.
 std::atomic<void(*)(long long)> g_rrvFieldWorkHook{nullptr};
 extern "C" void rrv_set_field_work_hook(void(*hook)(long long work_ns)){g_rrvFieldWorkHook.store(hook,std::memory_order_release);}
+// Display frame period source (Android, set by the host once the GS bridge is loaded): the display's measured frame
+// period in ns, 0 while unknown. With RRV_GATE3_DISPLAY_RATE_60 the pacer runs at that period instead of an exact
+// 1/60 s: panels are off their nominal rate (the Retroid Pocket Nova shows 60.12 frames a second at "120 Hz"), and a
+// game slower than its display runs the present queue dry, one repeated frame every few seconds.
+std::atomic<uint64_t(*)(void)> g_rrvDisplayPeriodSource{nullptr};
+extern "C" void rrv_set_display_period_source(uint64_t(*source)(void)){g_rrvDisplayPeriodSource.store(source,std::memory_order_release);}
 Gate3RealtimePacerV1& gate3RealtimePacerV1();
 struct Gate3RealtimePacerV1 {
     using Clock=std::chrono::steady_clock;
     static constexpr uint64_t kPeriodNum=1001000000000ull, kPeriodDen=60000ull; // ns = n*num/den
     static constexpr uint64_t kLockPeriodNum=kPeriodNum/1000*996; // the cap: 0.4 % less
+    static constexpr uint64_t kRate60PeriodNum=1000000000000ull; // exactly 1/60 s (RRV_GATE3_DISPLAY_RATE_60)
+    bool rate60=false;
     static constexpr uint64_t kLockWindow=240; // starts over which "held by the display" is judged
     static constexpr uint64_t kLockLead=3; // periods a start may be behind its deadline: the frames the pipeline holds
     uint64_t periodNum=kPeriodNum;
@@ -273,10 +281,17 @@ struct Gate3RealtimePacerV1 {
         spin=std::chrono::milliseconds(spinMs);
         if(const char* c=std::getenv("RRV_GATE3_REALTIME_PRECISE");c&&c[0]=='0'&&!c[1])precise=false;
         if(const char* c=std::getenv("RRV_DISPLAY_LOCK");c&&c[0]=='1'&&!c[1]){lock=true;held=true;tries=1;periodNum=kLockPeriodNum;}
+        // RRV_GATE3_DISPLAY_RATE_60=1 (Android, a display at a multiple of 60 Hz): exactly 60.00 starts per second
+        // instead of 60000/1001. The present pacer there holds each frame for whole refreshes on a grid locked to the
+        // display (pcsx2-android.patch, RrvAndroidPacePresent); at 59.94 the frames drift off that grid and one in
+        // every few hundred stays up a refresh longer, a visible hitch every few seconds. 0.1 % faster: the sound
+        // follows through its tempo stretch. Not with the display lock, which picks its own period.
+        if(const char* c=std::getenv("RRV_GATE3_DISPLAY_RATE_60");c&&c[0]=='1'&&!c[1]&&!lock){periodNum=kRate60PeriodNum;rate60=true;}
         if(const char* ff=std::getenv("MAGATAMA_FAST_FORWARD");ff&&ff[0]=='1')g_rrvFastForward.store(true);
         if(!enabled)return;
         std::fprintf(stderr,"[gate3] real-time pacing: 60000/1001 effective starts per host second, catch-up %lld ms, spin %ld ms\n",
             (long long)std::chrono::duration_cast<std::chrono::milliseconds>(catchup).count(),spinMs);
+        if(rate60)std::fprintf(stderr,"[gate3] display rate: 60.00 starts per host second (the display's multiple of 60 Hz)\n");
         if(lock)std::fprintf(stderr,"[gate3] display lock: the pacer caps the game at %.2f starts per host second; the display's sync paces it\n",
             double(kPeriodDen)*1e9/double(kLockPeriodNum));
         if(fastForward)std::fprintf(stderr,"[gate3] fast-forward: unpaced until start %llu\n",(unsigned long long)fastForward);
@@ -290,6 +305,20 @@ struct Gate3RealtimePacerV1 {
     Clock::duration Lead()const{return std::chrono::nanoseconds(static_cast<int64_t>(kLockLead*kLockPeriodNum/kPeriodDen));}
     Clock::time_point Deadline(uint64_t k)const{
         return anchor+std::chrono::nanoseconds(static_cast<int64_t>(k*periodNum/kPeriodDen));}
+    // RRV_GATE3_DISPLAY_RATE_60: take the display's measured frame period when it is within 1 % of 1/60 s (the audio
+    // follows through its tempo stretch). The schedule continues from the current deadline: no jump.
+    void FollowDisplay(){
+        const auto source=g_rrvDisplayPeriodSource.load(std::memory_order_acquire);
+        const uint64_t ns=source?source():0;
+        if(ns<16500000ull||ns>16833333ull)return;
+        const uint64_t num=ns*kPeriodDen;
+        if(num==periodNum)return;
+        const auto due=Deadline(n);
+        const bool first=periodNum==kRate60PeriodNum;
+        periodNum=num;
+        anchor=due-std::chrono::nanoseconds(static_cast<int64_t>(n*periodNum/kPeriodDen));
+        if(first)std::fprintf(stderr,"[gate3] display rate: following the display, %.4f starts per host second\n",1e9/double(ns));
+    }
     bool turboWas=false;
     void AtStart(){
         if(!enabled)return;
@@ -307,6 +336,7 @@ struct Gate3RealtimePacerV1 {
         if(auto hook=g_rrvFieldWorkHook.load(std::memory_order_acquire);hook&&lastRelease!=Clock::time_point{})
             hook(static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(now-lastRelease).count()));
         if(!anchored){anchored=true;anchor=now;n=0;if(held)anchor-=Lead();return;}
+        if(rate60&&(starts%60)==0)FollowDisplay();
         const auto due=Deadline(++n);
         if(now<due){
             ++waits;

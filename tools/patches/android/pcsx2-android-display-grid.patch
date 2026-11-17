@@ -1,0 +1,110 @@
+--- a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp	2026-11-10 13:11:46.992835415 -0600
++++ b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp	2026-11-10 13:30:53.313211337 -0600
+@@ -1240,6 +1240,11 @@
+ // g_rrv_display_frames - 1: the bridge's performance overlay draws these, not the host's present calls.
+ std::atomic<u64> g_rrv_display_frames{0};
+ float g_rrv_display_ms[128];
++// The display's real frame period for this pacing (refreshes per frame x the measured refresh, ns), or 0 until it is
++// known. Panels do not run at the rate they report: the Retroid Pocket Nova reports 120.00 Hz and refreshes every
++// 8.318 ms (120.2 Hz). The game's real-time pacer follows this (rrv_pcsx2_gs_bridge_display_frame_ns) so it makes
++// frames exactly as fast as the display shows them.
++std::atomic<u64> g_rrv_display_frame_ns{0};
+ static u64 RrvMonotonicNs()
+ {
+ 	timespec ts;
+@@ -1259,6 +1264,9 @@
+ 		u64 anchor = 0;       // a real vsync time (latest actualPresentTime)
+ 		u64 last_actual = 0;
+ 		u64 hist[5] = {};     // measured on-screen length in refreshes: 1, 2, 3, 4, 5+
++		u64 base_actual = 0;  // the real refresh: refreshes counted since this vsync time...
++		u64 base_refreshes = 0;
++		u64 measured = 0;     // ...give the measured refresh (ns), 0 until 240 are in
+ 		u64 late = 0, reanchors = 0, presents = 0;
+ 		u64 log_at = 0;
+ 	};
+@@ -1302,7 +1310,53 @@
+ 					continue;
+ 				if (st.last_actual && actual > st.last_actual)
+ 				{
+-					const u64 n = (actual - st.last_actual + st.refresh / 2) / st.refresh;
++					const u64 period = st.measured ? st.measured : st.refresh;
++					const u64 n = (actual - st.last_actual + period / 2) / period;
++					// The real refresh, over a long baseline (a few ppm after a few seconds). A gap that is no whole
++					// number of refreshes (a mode change, a long stall) starts the baseline again.
++					const u64 gap = actual - st.last_actual;
++					const u64 error = gap > n * period ? gap - n * period : n * period - gap;
++					if (!st.base_actual || n == 0 || n > 8 || error > period / 8)
++					{
++						st.base_actual = actual;
++						st.base_refreshes = 0;
++					}
++					else
++					{
++						st.base_refreshes += n;
++						if (st.base_refreshes >= 240)
++						{
++							const u64 m = (actual - st.base_actual + st.base_refreshes / 2) / st.base_refreshes;
++							// Trust it within 2 % of what the driver reports.
++							if (m * 50 > st.refresh * 49 && m * 50 < st.refresh * 51)
++							{
++								if (!st.measured)
++									std::fprintf(stderr, "[vk-pacing] measured refresh %.3f Hz (reported %.3f)\n",
++										1e9 / static_cast<double>(m), 1e9 / static_cast<double>(st.refresh));
++								st.measured = m;
++								g_rrv_display_frame_ns.store(m * st.cycles, std::memory_order_relaxed);
++							}
++							else
++							{
++								// The display runs at another rate than the swap chain reported (the mode changed after
++								// it was made): ask again on the next present, a few times at most.
++								static int requeries = 0;
++								if (requeries++ < 3)
++								{
++									std::fprintf(stderr, "[vk-pacing] display runs at %.2f Hz, not the reported %.2f: asking again\n",
++										1e9 / static_cast<double>(m), 1e9 / static_cast<double>(st.refresh));
++									st.swap_chain = VK_NULL_HANDLE;
++									return false;
++								}
++							}
++						}
++						// A long baseline is precise; past ~100 s restart it (a slowly changing panel clock).
++						if (st.base_refreshes >= 12000)
++						{
++							st.base_actual = actual;
++							st.base_refreshes = 0;
++						}
++					}
+ 					st.hist[std::min<u64>(n ? n : 1, 5) - 1]++;
+ 					const u64 index = g_rrv_display_frames.load(std::memory_order_relaxed);
+ 					g_rrv_display_ms[index % 128] = static_cast<float>(actual - st.last_actual) * 1e-6f;
+@@ -1321,20 +1375,25 @@
+ 		const long ms = value ? std::strtol(value, nullptr, 10) : 0;
+ 		return (ms >= 8 && ms <= 50 ? static_cast<u64>(ms) : 12ull) * 1000000ull;
+ 	}();
+-	const u64 lead = std::max<u64>(st.refresh + st.refresh / 2, lead_floor);
+-	u64 target = st.target ? st.target + st.cycles * st.refresh : 0;
+-	if (!target || target < now + lead || target > now + lead + 3 * st.cycles * st.refresh)
++	const u64 refresh = st.measured ? st.measured : st.refresh;
++	const u64 lead = std::max<u64>(refresh + refresh / 2, lead_floor);
++	u64 target = st.target ? st.target + st.cycles * refresh : 0;
++	// Keep the target on the real vsync grid (the latest vsync the display reported, whole refreshes on): a target
++	// advanced by a slightly wrong period drifts between two vsyncs and its frame lands a refresh late.
++	if (target && st.anchor && target > st.anchor)
++		target = st.anchor + ((target - st.anchor + refresh / 2) / refresh) * refresh;
++	if (!target || target < now + lead || target > now + lead + 3 * st.cycles * refresh)
+ 	{
+ 		if (st.target)
+ 			(target && target < now + lead) ? ++st.late : ++st.reanchors;
+ 		// The first vsync of the real grid that is far enough ahead.
+ 		const u64 earliest = now + lead;
+-		target = st.anchor ? st.anchor + ((earliest - st.anchor + st.refresh - 1) / st.refresh) * st.refresh : earliest;
++		target = st.anchor ? st.anchor + ((earliest - st.anchor + refresh - 1) / refresh) * refresh : earliest;
+ 	}
+ 	st.target = target;
+ 	time.presentID = st.next_id++;
+ 	// Just before the vsync, so the image is shown on that vsync and not the next.
+-	time.desiredPresentTime = target - st.refresh / 4;
++	time.desiredPresentTime = target - refresh / 4;
+ 	st.presents++;
+ 
+ 	if (now >= st.log_at)

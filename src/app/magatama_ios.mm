@@ -29,6 +29,8 @@
 #include <filesystem>
 #include <string>
 #include <cstring>
+#include <cctype>
+#include <unistd.h>
 #include <exception>
 #include <csignal>
 #include <dlfcn.h>
@@ -36,14 +38,6 @@
 #include <mach-o/dyld.h>
 
 int magatama_game_main(int argc, char **argv);
-
-// For the bridge's thermal readout (tools/patches/ios/bridge-thermal-osd-ios.diff), found with dlsym: the
-// NSProcessInfo thermal state (0 nominal, 1 fair, 2 serious, 3 critical), plus 16 while Low Power Mode is on.
-extern "C" __attribute__((visibility("default"), used)) int magatama_ios_thermal_state()
-{
-    NSProcessInfo *info = [NSProcessInfo processInfo];
-    return int(info.thermalState) | (info.lowPowerModeEnabled ? 16 : 0);
-}
 
 namespace {
 namespace fs = std::filesystem;
@@ -58,6 +52,48 @@ fs::path bundle() { return fs::path([[[NSBundle mainBundle] bundlePath] fileSyst
 void def(const char *name, const std::string &value) { setenv(name, value.c_str(), 0); }
 
 std::string g_elf;
+
+// The menu's Rendering > Metal HUD as saved in magatama.ini ([rendering] metal_hud), else the bundled defaults' value,
+// else on (the setting's default).
+bool metalHudSetting(const fs::path &ini)
+{
+    for (const fs::path &file : {ini, bundle() / "magatama-default.ini"})
+    {
+        FILE *f = std::fopen(file.c_str(), "r");
+        if (!f)
+            continue;
+        std::string section;
+        char buffer[512];
+        int found = -1;
+        while (found < 0 && std::fgets(buffer, sizeof buffer, f))
+        {
+            std::string line(buffer);
+            line.erase(0, line.find_first_not_of(" \t"));
+            while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())))
+                line.pop_back();
+            if (line.empty() || line[0] == '#' || line[0] == ';')
+                continue;
+            if (line[0] == '[')
+            {
+                section = line.substr(1, line.find(']') - 1);
+                continue;
+            }
+            const size_t eq = line.find('=');
+            if (section != "rendering" || eq == std::string::npos)
+                continue;
+            std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+            while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back())))
+                key.pop_back();
+            value.erase(0, value.find_first_not_of(" \t"));
+            if (key == "metal_hud")
+                found = !(value == "false" || value == "0" || value == "off" || value == "no");
+        }
+        std::fclose(f);
+        if (found >= 0)
+            return found == 1;
+    }
+    return true;
+}
 
 // Documents/magatama-env.txt: NAME=value lines (blank lines and # comments ignored) applied before the defaults
 // below, so they win. For trying runtime options on a device without a new build. A commented template is
@@ -79,8 +115,8 @@ void loadEnvFile(const fs::path &docs)
                        "# VU1 and graphics on two separate threads instead of one (default off):\n"
                        "#RRV_VU1GS_SPLIT=1\n"
                        "#\n"
-                       "# Hide the thermal readout:\n"
-                       "#MAGATAMA_THERMAL_OSD=0\n",
+                       "# What the Metal HUD shows (Apple's metric names, comma-separated; the default adds thermal):\n"
+                       "#MTL_HUD_ELEMENTS=device,fps,frameinterval,gputime,frameintervalgraph\n",
                        f);
             std::fclose(f);
         }
@@ -245,8 +281,16 @@ void startThreadCpuLog()
     }).detach();
 }
 
+#if defined(MAGATAMA_IOS_LAUNCHER)
+extern "C" int magatama_ios_run_launcher(const char *discDir); // src/launcher/ios/MagatamaLauncher.swift
+#endif
+
 int gameMain(int, char **)
 {
+#if defined(MAGATAMA_IOS_LAUNCHER)
+    // The launcher (import the disc image, then Play) before the game's window exists.
+    magatama_ios_run_launcher(fs::path(g_elf).parent_path().c_str());
+#endif
     [UIApplication sharedApplication].idleTimerDisabled = YES;
     startThreadCpuLog();
     std::fprintf(stderr, "[ios] low power mode=%d thermal state=%ld\n",
@@ -255,18 +299,21 @@ int gameMain(int, char **)
     std::error_code ec;
     if (!fs::is_regular_file(elf, ec))
     {
-        std::fprintf(stderr, "[ios] no game ELF at %s: copy the disc files into Magatama/disc\n", elf.c_str());
-        const std::string text = "Copy your own Shin Megami Tensei: Nocturne (USA) disc files into the Magatama "
-                                 "folder in the Files app, as disc/SLUS_209.11 and the rest of the disc, then open "
-                                 "Magatama again.\n\nLooked for: " + elf.string();
+        std::fprintf(stderr, "[ios] no game ELF at %s: import a disc image in the launcher\n", elf.c_str());
+        const std::string text = "Import your own Shin Megami Tensei: Nocturne (USA) disc image (.iso, .chd or .zso) "
+                                 "in the launcher, or copy the disc's files into the Magatama folder in the Files app "
+                                 "as disc/SLUS_209.11 and the rest, then open Magatama again.\n\nLooked for: " +
+                                 elf.string();
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Magatama needs your disc", text.c_str(), nullptr);
         return 1;
     }
     std::string exe = (bundle() / "Magatama").string();
     char *argv[] = {exe.data(), g_elf.data(), nullptr};
     const int status = magatama_game_main(2, argv);
-    std::fflush(stderr);
-    return status;
+    // The game has ended (Quit in the menu): close the app rather than leave it on its last frame.
+    std::fprintf(stderr, "[ios] game ended (%d): closing the app\n", status);
+    std::fflush(nullptr);
+    _exit(status);
 }
 } // namespace
 
@@ -328,6 +375,16 @@ int main(int argc, char **argv)
         def("RRV_VU1GS_EXECUTION", "owner-async");
         def("RRV_FUKAMI_INI", (docs / "magatama.ini").string());
         def("MTL_SHADER_DEPTH_WORKAROUND", "0");
+        // The Metal HUD, with the device's thermal state among its metrics (Apple's "thermal" element). Any MTL_HUD_*
+        // variable makes the HUD take its whole configuration from the process (over Settings > Developer), so the
+        // metric list alone left it switched off (b24): MTL_HUD_ENABLED goes with it, following the menu's
+        // Rendering > Metal HUD (saved in magatama.ini, on by default; the menu also shows/hides it live).
+        // Read when Metal starts, so it is set here; magatama-env.txt can change either.
+        if (metalHudSetting(docs / "magatama.ini"))
+        {
+            def("MTL_HUD_ENABLED", "1");
+            def("MTL_HUD_ELEMENTS", "device,layersize,memory,thermal,fps,frameinterval,gputime,presentdelay,frameintervalgraph");
+        }
         def("MAGATAMA_IPU", "1");
         def("MAGATAMA_IPU_WORKER_TIMING", "1");
         def("RRV_VU_AOT", "1");
@@ -339,6 +396,7 @@ int main(int argc, char **argv)
 #else
         def("RRV_PCSX2_GS_FULL_SCALE", "2");
 #endif
+        // RULE: landscape only on iPhone and iPad (CONTRIBUTING.md, "Hard rules"; Info.plist.in lists the same two).
         SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
         SDL_SetHint(SDL_HINT_IOS_HIDE_HOME_INDICATOR, "2");
         SDL_SetMainReady();

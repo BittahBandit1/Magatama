@@ -7,7 +7,7 @@
 #   build/android/Magatama-android-b<N>.apk     (debug-signed; N from ~/magatama/android-build-number, or
 #                                                 MAGATAMA_ANDROID_BUILD_NO)
 # Layout inside the APK:
-#   lib/arm64-v8a/  libSDL3.so libSDL2.so (sdl2-compat) libmain.so (the game) librrv-pcsx2-gs-bridge.so libc++_shared.so
+#   lib/arm64-v8a/  libSDL3.so libSDL2.so (sdl2-compat) libmain.so (the game) librrv-pcsx2-gs-bridge.so libc++_shared.so libmagatama_import.so (launcher)
 #   assets/game/    package/ (identity, PCSX2 resources, bound-workload.txt) + package.list (extracted on first launch)
 #   classes.dex     SDL3's Java activity (org.libsdl.app)
 set -euo pipefail
@@ -42,12 +42,13 @@ if run_from pcsx2; then
     [[ -d "$pcsx2/.git" ]] || git clone -q --no-local --no-checkout "$repo/build-deps/pcsx2-2.8.2" "$pcsx2"
     git -C "$pcsx2" checkout -q -f --detach "$rev"; git -C "$pcsx2" clean -qfd
     for p in "$repo/tools/patches/pcsx2-gs-bridge-target.patch" "$repo/tools/patches/pcsx2-gs-bridge-linux.patch" \
-             "$repo/tools/patches/android/pcsx2-android.patch"; do
+             "$repo/tools/patches/android/pcsx2-android.patch" "$repo/tools/patches/android/pcsx2-android-display-grid.patch"; do
         git -C "$pcsx2" apply "$p" || { echo "!! $p does not apply" >&2; exit 1; }
     done
     rm -rf "$out/bridge-src"; cp -R "$repo/tools/pcsx2-gs-bridge" "$out/bridge-src"
     (cd "$out/bridge-src" && patch -s -p1 < "$repo/tools/patches/android/bridge-android.diff" &&
-        patch -s -p1 < "$repo/tools/patches/mobile/bridge-touch-draw.diff")
+        patch -s -p1 < "$repo/tools/patches/mobile/bridge-touch-draw.diff" &&
+        patch -s -p1 < "$repo/tools/patches/android/bridge-android-surface.diff")
 fi
 
 # --------------------------------------------------------------------------------------------- 3. GS bridge
@@ -112,6 +113,15 @@ if run_from apk; then
     ndk_sysroot_lib="$(ls -d "$NDK"/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android | head -1)"
     cp "$product/candidate-bin/libmain.so" "$deps/lib/libSDL3.so" "$deps/lib/libSDL2.so" "$bridge_lib" \
        "$ndk_sysroot_lib/libc++_shared.so" "$apkdir/lib/$ABI/"
+    # The launcher's disc importer (LauncherActivity -> DiscImport): its own small library, so the launcher never
+    # loads the game. The same importer as iOS/macOS, on the product build's disc readers (libchdr, zstd, NDK zlib).
+    cxx="$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/clang++ | head -1)"
+    "$cxx" --target=aarch64-linux-android$API -std=c++20 -O2 -fPIC -shared -fvisibility=hidden \
+        -I"$repo/src/app" -I"$repo/build-deps/pcsx2-2.8.2/3rdparty/libchdr/include" \
+        "$repo/src/app/magatama_disc_import.cpp" "$repo/src/app/android/magatama_import_jni.cpp" \
+        "$product/librrv-disc-extract.a" "$product/librrv-disc-chdr.a" "$deps/lib/libzstd.a" -lz -llog \
+        -Wl,--gc-sections -Wl,-z,max-page-size=16384 -Wl,--no-undefined \
+        -o "$apkdir/lib/$ABI/libmagatama_import.so" || { echo "!! libmagatama_import.so failed"; exit 1; }
     # Symbols stay in the build tree (crash logs give library + offset); the APK carries stripped copies.
     strip="$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip | head -1)"
     for so in "$apkdir/lib/$ABI/"*.so; do "$strip" --strip-unneeded "$so"; done

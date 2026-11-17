@@ -13,8 +13,9 @@ import argparse, datetime, hashlib, json, pathlib, sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PATCHES = ["tools/patches/pcsx2-gs-bridge-target.patch", "tools/patches/pcsx2-gs-bridge-linux.patch",
-           "tools/patches/android/pcsx2-android.patch", "tools/patches/android/bridge-android.diff",
-           "tools/patches/mobile/bridge-touch-draw.diff"]
+           "tools/patches/android/pcsx2-android.patch", "tools/patches/android/pcsx2-android-display-grid.patch",
+           "tools/patches/android/bridge-android.diff",
+           "tools/patches/mobile/bridge-touch-draw.diff", "tools/patches/android/bridge-android-surface.diff"]
 
 
 def sha256(path: pathlib.Path) -> str:

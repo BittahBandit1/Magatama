@@ -14,6 +14,8 @@
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- The launcher brings the running game back to the front when the app icon is tapped again. -->
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
     <!-- Documents/Magatama (disc, saves, settings, logs): "All files access" on Android 11+, storage on 9-10. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
@@ -37,7 +39,15 @@
             android:launchMode="singleInstance"
             android:resizeableActivity="false"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
-            android:preferMinimalPostProcessing="true">
+            android:preferMinimalPostProcessing="true" />
+        <!-- The start screen: import the disc, then Play (src/app/android/dev/magatama/LauncherActivity.java). -->
+        <activity
+            android:name="dev.magatama.LauncherActivity"
+            android:label="Magatama"
+            android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -72,10 +72,14 @@ inline void macInteractiveQos() {
     char name[64]{};pthread_getname_np(pthread_self(),name,sizeof(name));
     std::fprintf(stderr,"[mac-qos] thread=%s user-interactive result=%d\n",name,error);
 #elif defined(__ANDROID__)
-    // Android (MAGATAMA_PERF_CORES=1, the launcher's default): keep the game, GS and VU threads on the performance
-    // cores (every core whose top clock is within 15% of the fastest: on a Snapdragon 8 Gen 2 the 3.2 GHz and 2.8 GHz
-    // cores, not the 2.0 GHz efficiency cores) and raise their priority, so the scheduler cannot park a frame's work
-    // on a slow core. Measured on a Retroid Pocket Nova: 60 FPS interpolation missed frames at scene changes.
+    // Android (MAGATAMA_PERF_CORES=1, the launcher's default): keep the game, GS and VU threads off the efficiency
+    // cores and raise their priority, so the scheduler cannot park a frame's work on a slow core. Measured on a Retroid
+    // Pocket Nova: 60 FPS interpolation missed frames at scene changes. The set is every core except the slowest
+    // cluster, and that one only when it is clearly an efficiency cluster (top clock under 70% of the fastest core's):
+    //   Snapdragon 8 Gen 2 (Nova, Odin 2, Thor, RP6): 3.2 + 2.8 GHz cores, not the 2.0 GHz ones (5 cores)
+    //   Snapdragon 8 Elite (Odin 3): all 8 (4.3 and 3.5 GHz: no efficiency cluster)
+    //   Snapdragon 865 (RP5, Mini, Flip 2): 2.84 + 2.42 GHz, not the 1.8 GHz ones (4 cores)
+    // Fewer than 3 cores left (an unusual layout): no affinity, only the priority.
     static const bool enabled=[] {const char* p=std::getenv("MAGATAMA_PERF_CORES");return p&&std::strcmp(p,"1")==0;}();
     if(!enabled)return;
     static thread_local bool attempted=false;
@@ -89,8 +93,13 @@ inline void macInteractiveQos() {
             if(FILE* f=std::fopen(path,"r")) {if(std::fscanf(f,"%ld",&freq[cpu])!=1)freq[cpu]=0;std::fclose(f);}
             if(freq[cpu]>top)top=freq[cpu];
         }
+        long slowest=top;
         for(long cpu=0;cpu<count&&cpu<CPU_SETSIZE;++cpu)
-            if(top>0&&freq[cpu]*100>=top*85)CPU_SET(cpu,&set);
+            if(freq[cpu]>0&&freq[cpu]<slowest)slowest=freq[cpu];
+        const bool efficiency=top>0&&slowest*100<top*70;
+        for(long cpu=0;cpu<count&&cpu<CPU_SETSIZE;++cpu)
+            if(freq[cpu]>0&&!(efficiency&&freq[cpu]==slowest))CPU_SET(cpu,&set);
+        if(CPU_COUNT(&set)<3)CPU_ZERO(&set);
         char list[128]="";
         for(long cpu=0;cpu<count&&cpu<CPU_SETSIZE;++cpu)
             if(CPU_ISSET(cpu,&set)){char item[16];std::snprintf(item,sizeof item,"%s%ld",list[0]?",":"",cpu);std::strncat(list,item,sizeof list-std::strlen(list)-1);}

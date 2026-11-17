@@ -81,7 +81,11 @@ extern "C" __attribute__((weak)) void rrv_free_camera_stick(float x, float y);
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
+#if defined(__APPLE__)
+#include <unistd.h> // _exit (iOS Quit)
+#endif
 
 namespace
 {
@@ -1772,6 +1776,10 @@ void SdlPresentation::Impl::drawTouchPad(void *impl)
         self->touch->draw(self->touchDraw);
 }
 
+#if defined(__ANDROID__)
+extern "C" void rrv_set_display_period_source(uint64_t (*source)(void)); // gate3_temporal_runtime.inc
+#endif
+
 void SdlPresentation::Impl::serviceMenu()
 {
     // Bind the overlay once the GS backend has loaded the bridge.
@@ -1785,6 +1793,11 @@ void SdlPresentation::Impl::serviceMenu()
             bridgeImage = image;
             setOverlay = reinterpret_cast<void (*)(RrvPcsx2GsBridgeOverlayFrame, void *)>(entry);
 #if !defined(_WIN32)
+#if defined(__ANDROID__)
+            // The game's pacer follows the display's measured frame rate (gate3_temporal_runtime.inc).
+            if (auto period = reinterpret_cast<uint64_t (*)(void)>(dlsym(image, "rrv_pcsx2_gs_bridge_display_frame_ns")))
+                rrv_set_display_period_source(period);
+#endif
             if (touch)
             {
                 touchDraw = reinterpret_cast<rrv::host::TouchPad::DrawFn>(
@@ -1815,6 +1828,16 @@ void SdlPresentation::Impl::serviceMenu()
     {
         std::fprintf(stderr, "[fukami-menu] quit\n");
         closeRequested = true;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+        // iOS keeps an app's process (and its last frame on screen) after the game loop ends: give the normal
+        // shutdown a moment, then end the process. The save card is a folder of files written as the game saves.
+        std::thread([] {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            std::fprintf(stderr, "[fukami-menu] quit: closing the app\n");
+            std::fflush(nullptr);
+            _exit(0);
+        }).detach();
+#endif
     }
     if (menu->takeRestartRequest() && fukami::app::canRestart())
     {

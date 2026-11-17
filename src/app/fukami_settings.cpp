@@ -334,8 +334,9 @@ const std::vector<Spec> &schema()
          Kind::boolean, "true", {}, 0, 0, Apply::live},
         {"rendering", "cas", "Sharpening (CAS)", "Sharpen the finished picture, 0 = off.",
          Kind::integer, "0", {}, 0, 100, Apply::live},
-        // macOS only: Apple's Metal Performance HUD (FPS, GPU time, memory) in the window's corner. Needs the process
-        // started with MTL_HUD_ENABLED=1 (magatama_run.sh does unless MAGATAMA_METAL_HUD=0); this shows or hides it.
+        // macOS and iOS: Apple's Metal Performance HUD (FPS, GPU time, memory; thermal state on iOS) in the corner.
+        // Needs the process started with MTL_HUD_ENABLED=1 (magatama_run.sh does unless MAGATAMA_METAL_HUD=0; on iOS
+        // magatama_ios.mm does while this is on); this shows or hides it.
         {"rendering", "metal_hud", "Metal HUD", "Apple's performance overlay: FPS, GPU time, memory.",
          Kind::boolean, "true", {}, 0, 0, Apply::live},
         {"rendering", "aniso", "Anisotropic filtering", "Keeps textures at steep angles sharp.",

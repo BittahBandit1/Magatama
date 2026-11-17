@@ -1,4 +1,7 @@
 // Fukami in-game menu; see fukami_menu.h.
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include "fukami_menu.h"
 
 #include "fukami_app.h"
@@ -439,8 +442,11 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
             m_pageAppearing = true;
         }
         ui.tooltip("Quit the game. Your save card is kept.");
-        ui.same_line();
         const bool canRestart = app::canRestart();
+#if !(defined(__APPLE__) && TARGET_OS_IPHONE)
+        // No Restart on iOS: an iOS app cannot relaunch itself (app::restart() does nothing there), so the button
+        // could only ever be greyed out. Quit closes the app; settings that need a restart apply when it is reopened.
+        ui.same_line();
         ui.begin_disabled(canRestart ? 0 : 1);
         if (ui.button("Restart") && canRestart)
         {
@@ -450,6 +456,7 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
         ui.tooltip(canRestart ? "Restart the game with saved settings. Unsaved progress will be lost." :
                                 "Launch with magatama_run.sh or the app to enable Restart.");
         ui.end_disabled();
+#endif
 
         std::vector<std::string> pending;
         for (const settings::Spec &spec : settings::schema())
@@ -461,9 +468,13 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
             for (const std::string &name : pending)
                 names += (names.empty() ? "" : ", ") + name;
             ui.spacing();
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+            ui.text_warning(("Quit and reopen Magatama to apply: " + names + ".").c_str());
+#else
             ui.text_warning(("Restart to apply: " + names + ".").c_str());
             if (!canRestart)
                 ui.text_disabled("Quit and relaunch to apply.");
+#endif
         }
 
         int row = 0;

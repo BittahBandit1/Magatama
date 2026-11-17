@@ -118,7 +118,6 @@ for m in "$metal"/*.metallib; do print "$m: $(xcrun -sdk $sdkname metal-objdump 
 rm -rf "$out/bridge-src"; cp -R "$repo/tools/pcsx2-gs-bridge" "$out/bridge-src" &&
 (cd "$out/bridge-src" && patch -s -p1 < "$repo/tools/patches/ios/bridge-metal-surface-ios.diff" &&
     patch -s -p1 < "$repo/tools/patches/ios/bridge-resources-ios.diff" &&
-    patch -s -p1 < "$repo/tools/patches/ios/bridge-thermal-osd-ios.diff" &&
     patch -s -p1 < "$repo/tools/patches/mobile/bridge-touch-draw.diff") ||
     { print "!! bridge source prep failed"; exit 1; }
 print "== pcsx2 configure (metal resources: $metal)"
@@ -155,6 +154,16 @@ print "== iOS build number $build_no"
 live_manifest="$repo/build/live-settings-bridge/rrv-pcsx2-gs-bridge-manifest.json"
 export MAGATAMA_BRIDGE_ROOT="$repo/build/live-settings-bridge-source"
 product="$out/product"
+# The launcher (src/launcher/ios, SwiftUI): one object, linked into the app with the Swift runtime from the OS.
+print "== launcher (Swift)"
+swift_target="arm64-apple-ios$minos"; (( sim )) && swift_target="arm64-apple-ios$minos-simulator"
+launcher_obj="$out/magatama-launcher.o"
+xcrun --sdk $sdkname swiftc -parse-as-library -emit-object -O -target "$swift_target" -sdk "$sdk" \
+    -module-name MagatamaLauncher -import-objc-header "$repo/src/app/magatama_disc_import.h" \
+    "$repo/src/launcher/ios/MagatamaLauncher.swift" -o "$launcher_obj" > "$out/launcher-build.log" 2>&1 ||
+    { print "!! launcher (Swift) failed"; tail -30 "$out/launcher-build.log"; exit 1; }
+swift_lib="$(dirname "$(xcrun --sdk $sdkname -f swiftc)")/../lib/swift/$sdkname"
+swift_link="-L$sdk/usr/lib/swift -L$swift_lib -Wl,-rpath,/usr/lib/swift"
 print "== product configure"
 # CMake leaves CMAKE_SYSTEM_PROCESSOR empty for iOS; the runtime picks sse2neon (ARM64) from it.
 [[ -f "$product/CMakeCache.txt" ]] && ! grep -q "^CMAKE_SYSTEM_PROCESSOR:.*=arm64" "$product/CMakeCache.txt" && rm -rf "$product"
@@ -163,6 +172,7 @@ cmake -S "$repo" -B "$product" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTE
     -DMAGATAMA_IOS_MIN_OS=$minos -DMAGATAMA_IOS_LEGACY=$legacy -DMAGATAMA_IOS_BUILD=$build_no \
     -DBUILD_TESTING=OFF -DRRV_BUILD_PRODUCT=ON -DRRV_PRODUCT_OWNED_SOURCE=ON -DRRV_GS_PRODUCER_CONTROL=ON \
     -DMAGATAMA_GAME=ON -DMAGATAMA_IOS_DEPS="$deps" \
+    -DMAGATAMA_IOS_LAUNCHER_OBJECT="$launcher_obj" -DMAGATAMA_IOS_SWIFT_LINK="$swift_link" \
     -DRRV_PCSX2_GS_BRIDGE_MANIFEST="$live_manifest" \
     -DRRV_PCSX2_SOURCE_DIR="$HOME/fukami/build-deps/pcsx2-2.8.2" \
     -DFETCHCONTENT_SOURCE_DIR_SSE2NEON="$repo/build-deps/sse2neon-92f6de1" \
@@ -196,6 +206,16 @@ for m in default Metal22 Metal23; do
     cp "$out/metal/$m.metallib" "$game/package/resources/$m.metallib"
 done
 cp "$repo/config/magatama/bound-workload.txt" "$app/bound-workload.txt"
+# RULE (CONTRIBUTING.md, "Hard rules"): landscape only on iPhone and iPad. Refuse to package anything else.
+for key in UISupportedInterfaceOrientations "UISupportedInterfaceOrientations~ipad"; do
+    orientations="$(plutil -extract "$key" xml1 -o - "$app/Info.plist" 2>/dev/null)"
+    if [[ -z "$orientations" ]] || [[ "$orientations" == *Portrait* ]] ||
+        [[ "$orientations" != *UIInterfaceOrientationLandscapeLeft* ]] ||
+        [[ "$orientations" != *UIInterfaceOrientationLandscapeRight* ]]; then
+        print "!! $key must list exactly the two landscape orientations (Magatama is landscape only on iOS)"
+        exit 1
+    fi
+done
 ipa="$out/$ipa_name"; rm -rf "$out/ipa" "$ipa"; mkdir -p "$out/ipa/Payload"
 cp -R "$app" "$out/ipa/Payload/"
 (cd "$out/ipa" && /usr/bin/zip -qry "$ipa" Payload) || { print "!! zip failed"; exit 1; }

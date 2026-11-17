@@ -24,10 +24,10 @@ Magatama is built on [Fukami](https://github.com/danisandoval/fukami), the Ridge
 - The game's own sound drivers, run on an IOP core, for music, effects and movie audio.
 - Controllers and keyboard everywhere; an on-screen controller on iPhone, iPad and Android that hides itself while a
   controller is connected.
-- An in-game settings menu (Esc, F1, the controller's Guide button or a three-finger tap).
+- An in-game settings menu (triggered with Esc or a three-finger tap).
 - Launchers for macOS, iOS and Android that import your disc image (`.iso`, `.chd` or `.zso`) and check it is the
   right one (SHA-256 of `SLUS_209.11`) before anything is copied.
-- Fast-forward and a free camera on the right stick.
+- Right Analog Stick controls the camera, enabled with an R3 click.
 
 ## Platforms
 
@@ -46,6 +46,10 @@ the disc); everything game-derived is generated from it on your computer. See [B
 
 Once built, the launcher's **Import Disc** button takes your disc image. On iPhone and iPad the disc, saves, settings
 and logs are in the app's folder in the Files app; on Android they are in `Documents/Magatama`.
+
+## Performance and Compatibility
+
+Performance and compatibility has been tested on many pieces of hardware. For iOS, the minimum for sustained 30 FPS is the A15 Bionic. On macOS, the minimum is A18 Pro or M1. Android minimum is Snapdragon 865. Adreno GPU is a requirement. x86-64 Builds have not been made or tested at this time.
 
 ## Contributing
 

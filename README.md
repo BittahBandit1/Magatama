@@ -40,10 +40,10 @@ x86-64 Builds have not been made or tested at this time.
 | Platform | Status |
 |---|---|
 | **macOS** (Apple silicon) | Main development platform. Built with `scripts/magatama_build.sh`; started with the Magatama Launcher app or `scripts/magatama_run.sh`. |
-| **iPhone and iPad** | Unsigned `.ipa` / `.tipa` for sideloading or TrollStore. iOS 16 or later on A12 or newer; a legacy build covers iOS 15 on A10/A11 (iPhone 7/8/X, iPod touch 7). Landscape only. |
+| **iPhone and iPad** | Unsigned `.ipa` / `.tipa` for sideloading or TrollStore. iOS 16 or later on A12 or newer; a legacy build covers iOS 15 as low as A10. |
 | **Android** | arm64 APK, Android 9 or later, Vulkan. Tested on Snapdragon (Adreno) handhelds; Mali GPUs are not supported yet. Works on 60 Hz and 120 Hz screens. |
-| **Linux** (x86-64, ARM64) | Native build from a kit (`scripts/magatama_build_linux.sh`); less tested. |
-| **Windows** | Not yet. |
+| **Linux** (x86-64, ARM64) | Native build from a kit (`scripts/magatama_build_linux.sh`); not tested. |
+| **Windows** | Currently not supported; in the works. |
 
 ## Getting started
 
@@ -58,7 +58,7 @@ and logs are in the app's folder in the Files app; on Android they are in `Docum
 - Button prompts are PlayStation only. In the future, Nintendo Switch and Xbox button prompts will be human-drawn and added into the game.
 - On macOS specifically, there is a small chance that the transition to your first battle upon bootup will slightly stutter.
 - In order to comply with copyright law, the launchers build the necessary code before the first runtime. This process can take a long time.
-- While Linux and Windows support is baked into the project via Fukami, zero work has been done to make those versions functional by me.
+- While Linux x86-64 and ARM support is baked into the project via Fukami, zero work has been done to make those versions functional by me.
 Bug reports are welcome, but do not expect support for fixing any issues if you build those versions from source.
 - This project as a whole is still experimental. Expect bugs and crashes. Save frequently when possible.
 - Interpolation is currently limited to 60 FPS. This limit will be rectified in the future.

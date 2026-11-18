@@ -5,10 +5,19 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-// Where things are. The game runs from the Magatama build tree (~/magatama/runtime) until it ships as an app bundle;
-// MAGATAMA_HOME overrides ~/magatama.
+// Where things are. Two layouts:
+//  - Magatama.app as the installer builds it (src/launcher/macos-installer): the game is Contents/MacOS/Fukami
+//    beside this launcher, and the disc, saves, settings and logs are in ~/Library/Application Support/Magatama.
+//  - the developer layout: the game runs from the build tree (~/magatama/runtime, scripts/magatama_run.sh) and
+//    the data is in ~/magatama. MAGATAMA_HOME overrides ~/magatama.
 enum Paths {
+    static var bundledGame: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/Fukami") }
+    static var bundled: Bool { FileManager.default.isExecutableFile(atPath: bundledGame.path) }
     static var home: URL {
+        if bundled {
+            return FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/Magatama")
+        }
         if let custom = ProcessInfo.processInfo.environment["MAGATAMA_HOME"], !custom.isEmpty {
             return URL(fileURLWithPath: custom)
         }
@@ -118,15 +127,20 @@ final class LauncherModel: ObservableObject {
     func cancelImport() { importProcess?.terminate() }
 
     func play() {
-        guard FileManager.default.isExecutableFile(atPath: "/bin/zsh") else { return }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-f", Paths.runScript.path, Paths.disc.path]
-        process.currentDirectoryURL = Paths.home.appendingPathComponent("runtime")
-        process.terminationHandler = { _ in
+        if Paths.bundled {
+            configureBundledGame(process)
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            process.arguments = ["-f", Paths.runScript.path, Paths.disc.path]
+            process.currentDirectoryURL = Paths.home.appendingPathComponent("runtime")
+        }
+        process.terminationHandler = { finished in
             DispatchQueue.main.async {
                 self.running = false
                 self.gameProcess = nil
+                // 75: the game asked to be restarted (the menu's Restart, settings that apply at launch).
+                if Paths.bundled && finished.terminationStatus == 75 { self.play() }
             }
         }
         do {
@@ -137,6 +151,59 @@ final class LauncherModel: ObservableObject {
         } catch {
             failed = true
             message = "Could not start the game: \(error.localizedDescription)"
+        }
+    }
+
+    // The game inside Magatama.app, with the environment scripts/magatama_run.sh gives it; its output goes to
+    // logs/run-<time>.log.
+    private func configureBundledGame(_ process: Process) {
+        let home = Paths.home
+        let fm = FileManager.default
+        for dir in ["memcard", "logs"] {
+            try? fm.createDirectory(at: home.appendingPathComponent(dir), withIntermediateDirectories: true)
+        }
+        let contents = Bundle.main.bundleURL.appendingPathComponent("Contents")
+        var env = ProcessInfo.processInfo.environment
+        let defaults: [String: String] = [
+            "RRV_GATE3_BOUND_WORKLOAD": contents.appendingPathComponent("Resources/workload/bound-workload.txt").path,
+            "RRV_GATE3_MC_ROOT": home.appendingPathComponent("memcard").path,
+            "RRV_GATE3_MC_PERSISTENT": "1",
+            "RRV_GATE3_LIVE_PAD": "1",
+            "RRV_GIF_PATH_LATENCY": "0",
+            "RRV_GATE3_REALTIME": "1",
+            "MAGATAMA_SILENT_SOUND": "1",
+            "MAGATAMA_SOUND": "1",
+            "MAGATAMA_SOUND_NATIVE": "1", // the game's own IOP sound modules (music, effects, movie audio)
+            "MAGATAMA_MAC_QOS": "1",
+            "MAGATAMA_DISC": Paths.disc.path,
+            "RRV_GS_CONTROL": "producer",
+            "RRV_PCSX2_GS_VSYNC": "1",
+            "RRV_GS_EXECUTION": "worker-sync",
+            "RRV_VU1GS_EXECUTION": "owner-async",
+            "RRV_FUKAMI_INI": home.appendingPathComponent("magatama.ini").path,
+            "MTL_SHADER_DEPTH_WORKAROUND": "0",
+            "MAGATAMA_IPU": "1",
+            "MAGATAMA_IPU_WORKER_TIMING": "1",
+            "RRV_VU_AOT": "1",
+            "MAGATAMA_RESTART_LAUNCHER": "1",
+            // The game binary has Fukami's app front end built in (src/app/fukami_app.mm); this launcher is the
+            // front end here, so the game starts as the child it starts.
+            "RRV_FUKAMI_CHILD": "1",
+            // The PCSX2 bridge's libraries are in Contents/Frameworks.
+            "DYLD_LIBRARY_PATH": contents.appendingPathComponent("Frameworks").path,
+        ]
+        for (key, value) in defaults where env[key] == nil { env[key] = value }
+        process.environment = env
+        process.executableURL = Paths.bundledGame
+        process.arguments = [Paths.disc.appendingPathComponent("SLUS_209.11").path]
+        process.currentDirectoryURL = home
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyyMMdd-HHmmss"
+        let log = home.appendingPathComponent("logs/run-\(stamp.string(from: Date())).log")
+        fm.createFile(atPath: log.path, contents: nil)
+        if let handle = try? FileHandle(forWritingTo: log) {
+            process.standardOutput = handle
+            process.standardError = handle
         }
     }
 }
@@ -155,10 +222,7 @@ struct LauncherView: View {
                            startPoint: .top, endPoint: .bottom)
             VStack(spacing: 18) {
                 Spacer()
-                Text("MAGATAMA")
-                    .font(.system(size: 46, weight: .heavy, design: .serif))
-                    .tracking(7)
-                    .foregroundColor(.white)
+                MagatamaLogo(height: 56)
                 Text("Shin Megami Tensei: Nocturne")
                     .font(.title3)
                     .foregroundColor(.white.opacity(0.7))
@@ -233,5 +297,20 @@ struct MagatamaLauncherApp: App {
             LauncherView(model: model)
         }
         .windowResizability(.contentSize)
+    }
+}
+
+/// The Magatama wordmark (assets/branding/magatama-wordmark.png, copied into Contents/Resources), or the name in
+/// text when the image is missing (a development build run outside its bundle).
+struct MagatamaLogo: View {
+    var height: CGFloat
+    var body: some View {
+        if let url = Bundle.main.url(forResource: "MagatamaWordmark", withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fit).frame(height: height)
+        } else {
+            Text("MAGATAMA").font(.system(size: height * 0.85, weight: .heavy, design: .serif)).tracking(6)
+                .foregroundColor(.white)
+        }
     }
 }

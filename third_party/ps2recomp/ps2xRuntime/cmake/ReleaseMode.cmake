@@ -51,9 +51,11 @@ function(EnableFastReleaseMode TargetName)
         endif()
     endif()
 
-    if(IPO_SUPPORTED)
+    # RRV_NO_IPO: the macOS installer kit ships prebuilt objects that must link with whatever Apple clang the user has;
+    # LTO objects are LLVM bitcode tied to the compiler that wrote them.
+    if(IPO_SUPPORTED AND NOT RRV_NO_IPO)
         set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    else()
+    elseif(NOT IPO_SUPPORTED)
         message(WARNING "Interprocedural optimization not supported: ${ipo_error}")
     endif()
 endfunction()

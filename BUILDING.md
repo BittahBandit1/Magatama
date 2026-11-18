@@ -58,6 +58,18 @@ scripts/magatama_build_launcher_mac.sh        # ~/magatama/Magatama Launcher.app
 scripts/magatama_run.sh [disc-folder]         # or run the game straight from the build tree
 ```
 
+The macOS release is an installer that holds no game code:
+
+```sh
+scripts/magatama_macos_release.sh [version]   # build/macos-release/Magatama-<version>-macOS-Installer.zip
+```
+
+It builds the libraries the bridge needs (SDL, freetype, png, jpeg, webp, zstd, lz4, plutosvg, rapidyaml) and the
+bridge itself for macOS 14, the runtime without link-time optimisation, and a kit
+(`scripts/magatama_macos_kit.py`: prebuilt runtime, headers, compile and link recipe, recompiler, generators). The
+installer app (`src/launcher/macos-installer`) runs that recipe on the user's Mac from their disc image. The script
+fails if any bundled library needs a newer macOS than 14, or if anything game-derived reaches the installer.
+
 ### iPhone and iPad
 
 ```sh
@@ -76,7 +88,13 @@ Simulator instead.
 ANDROID_NDK=/path/to/ndk ANDROID_SDK=/path/to/sdk scripts/magatama_build_android.sh
 ```
 
-Stages `deps`, `pcsx2`, `bridge`, `product` and `apk` each resume; name one to start there. The APK is debug-signed with
+Stages `deps`, `pcsx2`, `bridge`, `product`, `tools`, `toolchain`, `kit` and `apk` each resume; name one to start
+there. The APK holds no game code: `product` builds only the runtime, `tools` the recompiler and generators for the
+phone, `toolchain` stages the compiler the app runs (clang and lld from Termux's packages, listed in
+`tools/android/termux-toolchain.txt`; unpack them into one folder and set `MAGATAMA_ANDROID_TERMUX`), and `kit` writes
+the compile and link recipe (`tools/android/magatama_android_kit.py`). On the device the app's `GameBuilder` translates,
+compiles and links the game from the imported disc into its private storage. The `apk` stage refuses an APK with game
+code in it. The APK is debug-signed with
 `~/magatama/android-debug.keystore` (created on first use; `MAGATAMA_ANDROID_KEYSTORE` overrides); keep that file, or a
 new build will not install over an old one. On the device, allow "All files access" when asked: the disc, saves,
 settings and logs live in `Documents/Magatama`.

@@ -12,15 +12,20 @@ root=Path(__file__).resolve().parents[1]
 ap=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument('--elf',default=str(root.parent/'disc/SLUS_209.11'))
 ap.add_argument('--out',default=str(root/'generated/nocturne/effects/nocturne_bezier.cpp'))
+ap.add_argument('--build-generator',metavar='PATH',help='only build the generator (no ELF needed) to PATH; the macOS installer kit ships it')
+ap.add_argument('--target',help='-mmacosx-version-min for --build-generator')
 args=ap.parse_args();elf=Path(args.elf)
-data=elf.read_bytes();expected='a26e86e59cab447d9b1839ec11ab82b1557230bcc99746b78e3b5d4359dcc6ff'
-if hashlib.sha256(data).hexdigest()!=expected:raise SystemExit('USA ELF identity mismatch')
+if not args.build_generator:
+    data=elf.read_bytes();expected='a26e86e59cab447d9b1839ec11ab82b1557230bcc99746b78e3b5d4359dcc6ff'
+    if hashlib.sha256(data).hexdigest()!=expected:raise SystemExit('USA ELF identity mismatch')
 # The recompiler build whose fmt/rabbitizer this tool links: scripts/magatama_generate.py's, else a Fukami checkout's.
 cache=Path(os.environ['MAGATAMA_RECOMPILER_BUILD']) if os.environ.get('MAGATAMA_RECOMPILER_BUILD') else root/'build/magatama-generate/recompiler'
 if not cache.is_dir():cache=Path(os.environ.get('FUKAMI_DIR',str(Path.home()/'fukami')))/'build/fukami-generate/recompiler'
 deps=cache/'_deps';build=root/'build/nocturne-effects';build.mkdir(parents=True,exist_ok=True)
-source=root/'third_party/ps2recomp';gen=build/'generate'
+source=root/'third_party/ps2recomp';gen=Path(args.build_generator) if args.build_generator else build/'generate'
 cmd=['c++','-std=c++20','-O2',*['-I'+str(p) for p in [source/'ps2xRecomp/include',source/'ps2xRuntime/include',deps/'fmt-src/include',deps/'rabbitizer-src/include',deps/'rabbitizer-src/tables']],str(root/'tools/nocturne-effects/generate.cpp'),str(source/'ps2xRecomp/src/lib/code_generator.cpp'),str(source/'ps2xRecomp/src/lib/r5900_decoder.cpp'),str(deps/'fmt-build/libfmt.a'),str(cache/'ps2recomp/ps2xRecomp/librabbitizer.a'),'-o',str(gen)]
+if args.target:cmd.insert(1,'-mmacosx-version-min='+args.target)
 subprocess.run(cmd,check=True)
+if args.build_generator:raise SystemExit(0)
 out=Path(args.out);out.parent.mkdir(parents=True,exist_ok=True);subprocess.run([str(gen),str(elf),str(out)],check=True)
 print('Generated sixteen original functions:17cd90,1ac298,17cb88,188b40,1824c0,2862d0,162448,192440,192a70,192a80,192a90,192a98,16be98,16beb8,16bed0,1667f0')

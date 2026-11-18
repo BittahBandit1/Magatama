@@ -2,7 +2,17 @@
 
 Versions follow [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`. The file `VERSION` holds the current one.
 
-## Magatama (unreleased developer preview)
+## Magatama 0.1.0 (unreleased)
+
+The first Magatama release: macOS.
+
+- **macOS installer:** Magatama Installer.app holds no game code. Drop your disc image on it and it translates the game
+  from your own `SLUS_209.11`, compiles it with Apple's command-line compiler and links Magatama.app on your Mac
+  (a few minutes). Runs on macOS 14 or later: the bridge and its libraries are built from source for macOS 14.
+- **Android (not in this release):** the APK no longer contains the game. The app translates, compiles and links it
+  on the device from the imported disc, with the compiler it carries (clang and lld 21), in a background service.
+
+## Magatama (developer preview)
 
 Magatama forks Fukami 1.1.0 for Shin Megami Tensei: Nocturne (USA, SLUS-20911). The entries below 1.1.0 are Fukami's
 history (Ridge Racer V), kept as it was.

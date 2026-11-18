@@ -50,6 +50,9 @@ export MAGATAMA_SILENT_SOUND="${MAGATAMA_SILENT_SOUND:-1}"
 # Sound: the host SDFSDMAN driver (src/audio/nocturne_sound.cpp) plays the game's music and effects and answers
 # its bank/stream status; when it runs, the silent bank stand-in above is not used. MAGATAMA_SOUND=0 turns it off.
 export MAGATAMA_SOUND="${MAGATAMA_SOUND:-1}"
+# The game's own IOP sound modules (music, effects, movie audio; src/audio/nocturne_native_sound.cpp), as on iOS and
+# Android. MAGATAMA_SOUND_NATIVE=0 falls back to the host SDFSDMAN driver above (no movie audio).
+export MAGATAMA_SOUND_NATIVE="${MAGATAMA_SOUND_NATIVE:-1}"
 # Keep time-sensitive EE/GS work responsive while system overlays (Spotlight
 # typing) compete for CPU. Per-thread QoS only; no global OS policy or affinity.
 # MAGATAMA_MAC_QOS=0 restores inherited scheduling for comparison.

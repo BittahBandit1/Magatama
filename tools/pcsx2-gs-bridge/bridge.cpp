@@ -225,6 +225,18 @@ constexpr std::array<size_t, kSlotCount> kPcsx2Offsets = {
 
 static_assert(kPcsx2Offsets.size() == kSlotCount);
 
+// An internal scale: a whole or fractional multiple from 1 to 8 ("2", "2.41"). 0 when invalid.
+float ParseUpscale(const char* text)
+{
+    if (!text || !*text || std::strlen(text) > 8)
+        return 0.0f;
+    char* end = nullptr;
+    const float value = std::strtof(text, &end);
+    if (end == text || *end != '\0' || !(value >= 1.0f && value <= 8.0f))
+        return 0.0f;
+    return value;
+}
+
 void SetError(char* destination, uint32_t capacity, const char* format, ...)
 {
     if (!destination || capacity == 0)
@@ -1312,22 +1324,25 @@ extern "C" RrvPcsx2GsBridge* rrv_pcsx2_gs_bridge_create(
         // field's target already is the progressive frame.
         options.UpscaleMultiplier = 2.0f;
         options.InterlaceMode = GSInterlaceMode::Off;
-        // RRV_PCSX2_GS_FULL_SCALE=1..8: internal scale (default 2). The
-        // parity-dependent OFY is canonicalised away (below), so odd scales
-        // keep both parities on one grid too; 1 has no extra progressive rows.
+        // RRV_PCSX2_GS_FULL_SCALE=1..8: internal scale (default 2), a whole or
+        // fractional multiple (e.g. 2.41: the host matches the screen's
+        // resolution, fukami_menu.cpp followDisplay). The parity-dependent OFY
+        // is canonicalised away (below), so odd scales keep both parities on
+        // one grid too; 1 has no extra progressive rows.
         // RRV_PCSX2_GS_FULL_HWMIPMAP=0|1: PCSX2's GS mipmap emulation (PCSX2
         // default on). Launcher option `mipmap` (owner decision 2026-09-29);
         // 0 departs from hardware (the guest's MIPMAP/TEX1 levels are ignored).
         if (const char* value = std::getenv("RRV_PCSX2_GS_FULL_SCALE"); value && value[0] != '\0')
         {
-            if (value[0] < '1' || value[0] > '8' || value[1] != '\0')
+            const float scale = ParseUpscale(value);
+            if (scale == 0.0f)
             {
                 SetError(error, error_capacity, "invalid RRV_PCSX2_GS_FULL_SCALE=%s (expected 1..8)", value);
                 return nullptr;
             }
-            options.UpscaleMultiplier = static_cast<float>(value[0] - '0');
-            std::fprintf(stderr, "[pcsx2-gs-bridge] render mode=full: UpscaleMultiplier=%s%s\n", value,
-                         value[0] == '1' ? " [diagnostic override]" : "");
+            options.UpscaleMultiplier = scale;
+            std::fprintf(stderr, "[pcsx2-gs-bridge] render mode=full: UpscaleMultiplier=%g\n",
+                         static_cast<double>(scale));
         }
         if (const char* value = std::getenv("RRV_PCSX2_GS_FULL_HWMIPMAP"); value && value[0] != '\0')
         {
@@ -2027,6 +2042,9 @@ extern "C" void rrv_pcsx2_gs_bridge_destroy(RrvPcsx2GsBridge* bridge)
                      static_cast<unsigned long long>(GSRrvGetSpriteCoverageDraws()),
                      static_cast<unsigned long long>(SpriteCoverage().hud_sprites),
                      static_cast<unsigned long long>(SpriteCoverage().hud_unknown));
+    if (bridge->full_frame)
+        std::fprintf(stderr, "[pcsx2-gs-bridge] full-frame: whole-frame feedback draws at native scale=%llu\n",
+                     static_cast<unsigned long long>(GSRrvGetNativeFeedbackDraws()));
     const ScopedBridgeGsFpcr fpcr_guard(bridge->fp_isolated);
     if (bridge->open)
         GSclose();
@@ -3424,9 +3442,17 @@ int OverlaySetRenderOption(const char* key, const char* value)
     if (!key || !value) return 0;
     const std::string_view k(key), v(value);
     Pcsx2Config::GSOptions next = s_menu_options ? *s_menu_options : GSConfig;
-    if (k == "scale") {
-        if (v.size()!=1 || v[0]<'1' || v[0]>'8') return 0;
-        next.UpscaleMultiplier = float(v[0]-'0');
+    if (k == "scene_scale") {
+        // The 3D scene's own scale (GSRrvSetSceneScale; "0" = the same as scale). Taken by the next draw.
+        const float scale = v == "0" ? 0.0f : ParseUpscale(value);
+        if (scale == 0.0f && v != "0") return 0;
+        GSRrvSetSceneScale(scale);
+        std::fprintf(stderr,"[pcsx2-gs-bridge] menu: scene scale=%s\n",value);
+        return 1;
+    } else if (k == "scale") {
+        const float scale = ParseUpscale(value);
+        if (scale == 0.0f) return 0;
+        next.UpscaleMultiplier = scale;
     } else if (k == "aa1" || k == "mipmap") {
         if (v!="true" && v!="false") return 0;
         if (k=="aa1") next.HWAA1 = v=="true";
@@ -3452,7 +3478,7 @@ const char* OverlayGetRenderOption(const char* key)
     if (!key) return nullptr;
     const std::string_view k(key);
     static char number[32]; // same serialized owner as the caller
-    if (k=="scale") std::snprintf(number,sizeof(number),"%.0f",GSConfig.UpscaleMultiplier);
+    if (k=="scale") std::snprintf(number,sizeof(number),"%g",static_cast<double>(GSConfig.UpscaleMultiplier));
     else if (k=="aniso") std::snprintf(number,sizeof(number),"%u",unsigned(GSConfig.MaxAnisotropy));
     else if (k=="cas") std::snprintf(number,sizeof(number),"%u",GSConfig.CASMode==GSCASMode::Disabled?0u:unsigned(GSConfig.CAS_Sharpness));
     else if (k=="aa1") return GSConfig.HWAA1?"true":"false";
@@ -3485,7 +3511,7 @@ void ApplyMenuRenderOptions(uint64_t field)
         GSRrvSetSpriteCoverage(SpriteCoverage().on);
         s_menu_sprite_coverage = -1;
     }
-    std::fprintf(stderr,"[pcsx2-gs-bridge] menu: applied field=%llu scale=%.0f aa1=%d aniso=%u texture_filter=%d sprite_filter=%d mipmap=%d\n",
+    std::fprintf(stderr,"[pcsx2-gs-bridge] menu: applied field=%llu scale=%.2f aa1=%d aniso=%u texture_filter=%d sprite_filter=%d mipmap=%d\n",
                  static_cast<unsigned long long>(field),GSConfig.UpscaleMultiplier,
                  int(GSConfig.HWAA1),unsigned(GSConfig.MaxAnisotropy),int(GSConfig.TextureFiltering),
                  int(SpriteCoverage().on),int(GSConfig.HWMipmap));

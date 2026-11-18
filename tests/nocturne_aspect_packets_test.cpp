@@ -30,9 +30,9 @@ int main(int argc,char**argv){
   PacketFilter f;f.apply(3,setup.data(),setup.size(),16.f/9);
   // PACKED UV + XYZF with PRE; arbitrary reserved bits/ADC remain untouched.
   Bytes b;qword(b,1ull|(1ull<<46)|(uint64_t(0x156)<<47)|(2ull<<60),0x43);
-  qword(b,0x1234005678ull);qword(b,uint64_t(1792*16)|(uint64_t(1936*16)<<32),0x80000000abcdef00ull);
+  qword(b,0x1234005678ull);qword(b,uint64_t(1800*16)|(uint64_t(1936*16)<<32),0x80000000abcdef00ull);
   auto original=b;auto* p=f.apply(2,b.data(),b.size(),16.f/9);
-  check(xy(p+32)==1856*16&&xy(p+36)==1936*16,"PACKED XYZF coordinate layout correct");
+  check(xy(p+32)==1862*16&&xy(p+36)==1936*16,"PACKED XYZF coordinate layout correct");
   for(size_t i=0;i<b.size();++i)if(!(i>=32&&i<34))check(p[i]==original[i],"PACKED UV,Z,fog,ADC untouched");
  }
  {
@@ -116,6 +116,38 @@ int main(int argc,char**argv){
   }
   auto panel=ad({{0x0,0x47},{xyz(1800,2060,0xfffff0),5},{xyz(1900,2060,0xfffff0),5},{xyz(1800,2100,0xfffff0),5},{xyz(1900,2100,0xfffff0),5}});
   check(f.apply(2,panel.data(),panel.size(),ratio)!=panel.data(),"far-depth HUD panel still keeps original proportions");
+ }
+ // A field-menu party row (run-20261117-202057 draw 125384): a 1:1 body sprite, then
+ // one texel column stretched to the right edge. The edge vertex stays on the
+ // display edge, everything else keeps the HUD's proportions.
+ {
+  PacketFilter f;f.apply(3,setup.data(),setup.size(),16.f/9);auto scale=hudScale(16.f/9);
+  auto map=[](int x,float s){return uint16_t(std::lround(32768+(x*16-32768)*s));};
+  auto uv=[](unsigned u){return std::pair<uint64_t,uint64_t>{uint64_t(u*16+8),3};};
+  auto row=ad({uv(1),{xyz(1999,1960),5},uv(159),{xyz(2157,1971),5},uv(158),{xyz(2157,1960),5},uv(159),{xyz(2304,1971),5}});
+  auto* p=f.apply(2,row.data(),row.size(),16.f/9);
+  check(xy(p+32)==map(1999,scale.x)&&xy(p+64)==map(2157,scale.x)&&xy(p+96)==map(2157,scale.x),"row body keeps HUD proportions");
+  check(xy(p+128)==2304*16,"row edge column reaches the display edge");
+  // The Money box (draw 125373): one 1:1 sprite from the left edge, its label in the
+  // texture. Widening it would stretch the label, so it keeps the HUD's proportions.
+  auto money=ad({uv(1),{xyz(1792,2138),5},uv(194),{xyz(1985,2150),5}});
+  p=f.apply(2,money.data(),money.size(),16.f/9);
+  check(xy(p+32)==map(1792,scale.x)&&xy(p+64)==map(1985,scale.x),"textured edge detail is not stretched");
+ }
+ // The load screen's red Yes/No highlight (run-20261117-192816 draw 7616): the
+ // lighting state, a fan at x 16..112, y 148..159. It follows the HUD text; a
+ // menu band from edge to edge (draw 7606) keeps both ends on the edges.
+ for (float ratio : {16.f/9, 21.f/9}) {
+  PacketFilter f;auto state=ad({{8ull<<16,0x4c},{1ull<<32,0x4e},{0x33801,0x47},{223ull<<48,0x40},{0x4d,0}});
+  f.apply(3,state.data(),state.size(),ratio);auto scale=hudScale(ratio);
+  auto map=[](int x,float s){return uint16_t(std::lround(32768+(x*16-32768)*s));};
+  auto fan=ad({{0x92070140,1},{xyz(1808,2084,0xfffff),5},{xyz(1856,2084,0xfffff),5},{xyz(1856,2095,0xfffff),5},{xyz(1904,2095,0xfffff),5}});
+  auto* p=f.apply(2,fan.data(),fan.size(),ratio);
+  check(xy(p+32)==map(1808,scale.x)&&xy(p+48)==map(1856,scale.x)&&xy(p+80)==map(1904,scale.x),"menu highlight follows the HUD text");
+  auto band=ad({{0x40302b,1},{xyz(1792,1983,0xfffff),5},{xyz(1839,1983,0xfffff),5},{xyz(2304,1983,0xfffff),5},{xyz(1792,2140,0xfffff),5}});
+  p=f.apply(2,band.data(),band.size(),ratio);
+  check(xy(p+32)==1792*16&&xy(p+64)==2304*16&&xy(p+80)==1792*16,"menu band keeps both ends on the display edges");
+  check(xy(p+48)==map(1839,scale.x),"menu band interior vertex keeps HUD proportions");
  }
  // Replay actual pre-existing traces offline, without a renderer/window. The
  {

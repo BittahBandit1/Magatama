@@ -26,6 +26,7 @@
 #include <vector>
 
 uint64_t rrv_gate3_realtime_waits();
+uint64_t rrv_gate3_realtime_starts(); // paced field starts so far (the real-time pacer)
 
 namespace magatama::skin {
 
@@ -88,22 +89,35 @@ public:
         double budgetUs=1000, spentUs=0, reservedUs=0; std::unordered_map<uint32_t,bool> allowed;
         std::unordered_map<uint32_t,double> cost, frameCost; // per model root: smoothed us per frame; this frame's
         uint64_t skippedModels=0, frames=0, slowFrames=0, waits=0;
+        static constexpr uint32_t kWindow=16; // built frames (32 fields, ~0.5 s)
+        struct Sample{double us=0,fields=0;}; std::array<Sample,kWindow> window{}; uint32_t windowAt=0, windowFill=0; uint64_t startsAt=0;
     } budget;
     bool allow(uint32_t root){
         auto& b=budget;const auto now=std::chrono::steady_clock::now();
         if(b.gen!=gen_){
-            // Slack: the real-time pacer waited for a start during the frame (the game was
-            // ahead of real time). A frame with no wait ran flat out, at or behind real time:
-            // halve. Wall time between frames jitters by more than the margin, so it only
-            // excludes one-off hitches (loading, >100 ms).
-            const uint64_t waits=rrv_gate3_realtime_waits();
+            // Behind real time = the built frames of the last ~half second took longer than their fields. Single
+            // frames jitter with presentation (whole 120 Hz refreshes), and a frame the display holds shows no
+            // pacer wait even on time, so neither one frame's length nor the pacer's waits tell (b42 on the Nova,
+            // the Tower of Kagutsuchi: every frame "waited", the budget stayed at its 20 ms cap and the game ran
+            // at 87 % speed). On a window: shrink the halfway work while the game is behind, grow it back slowly
+            // while it keeps time; after shrinking, let the window refill before judging again.
             if(b.gen&&b.gen+1==gen_){
-                const double frameUs=std::chrono::duration<double,std::micro>(now-b.start).count();
                 ++b.frames;
-                if(waits==b.waits&&frameUs<100000){++b.slowFrames;b.budgetUs=std::min(b.budgetUs,b.spentUs)*0.5;}
-                else if(waits!=b.waits)b.budgetUs=std::min(20000.0,b.budgetUs+250);
+                const uint64_t starts=rrv_gate3_realtime_starts();
+                const double frameUs=std::chrono::duration<double,std::micro>(now-b.start).count();
+                if(frameUs<100000&&starts>b.startsAt){
+                    auto& w=b.window[b.windowAt++%Budget::kWindow];w.us=frameUs;w.fields=double(starts-b.startsAt);
+                    b.windowFill=std::min<uint32_t>(b.windowFill+1,Budget::kWindow);
+                }else b.windowFill=0; // a hitch (loading) or no paced fields: start the window over
+                if(b.windowFill==Budget::kWindow){
+                    constexpr double kFieldUs=1e6*1001/60000; // one NTSC field
+                    double us=0,fields=0;for(const auto& w:b.window){us+=w.us;fields+=w.fields;}
+                    const double ratio=us/(fields*kFieldUs);
+                    if(ratio>1.02){++b.slowFrames;b.budgetUs=std::min(b.budgetUs,b.spentUs)*0.5;b.windowFill=0;}
+                    else if(ratio<1.01)b.budgetUs=std::min(20000.0,b.budgetUs+250);
+                }
             }
-            b.waits=waits;
+            b.startsAt=rrv_gate3_realtime_starts();
             for(const auto& [r,us]:b.frameCost){auto i=b.cost.find(r);if(i==b.cost.end())b.cost.emplace(r,us);else i->second=.75*i->second+.25*us;}
             if(b.cost.size()>4096)b.cost.clear();
             b.frameCost.clear();

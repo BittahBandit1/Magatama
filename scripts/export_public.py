@@ -148,7 +148,11 @@ LARGE_FILE_ALLOW = {
 }
 
 # PNG/JPEG are allowed only here (README screenshots); never as game assets elsewhere.
-IMAGE_ALLOWED_DIRS = ("docs/img/", "public/img/", "tools/fukami-app/fukami.png")
+IMAGE_ALLOWED_DIRS = ("docs/img/", "public/img/", "tools/fukami-app/fukami.png", "assets/branding/")
+# PCSX2's own bundled resources (icons, fullscreen UI art) inside a built resource package.
+IMAGE_ALLOWED_PARTS = ("/.rrv-resource-packages/current/resources/",)
+# The launcher's wordmark, copied from assets/branding into the macOS apps (scripts/magatama_macos_release.sh).
+IMAGE_ALLOWED_NAMES = ("MagatamaWordmark.png",)
 
 
 # Ignored directories of a public checkout that a re-export must never delete.
@@ -313,7 +317,8 @@ def run_gates(tree: Path) -> list[str]:
             problems.append(f"{rel}: forbidden path")
             continue
         size = path.stat().st_size
-        if size > MAX_FILE_BYTES and rel not in LARGE_FILE_ALLOW:
+        if size > MAX_FILE_BYTES and rel not in LARGE_FILE_ALLOW and not rel.endswith(
+                "/.rrv-resource-packages/current/librrv-pcsx2-gs-bridge.dylib"):  # the PCSX2 GS bridge (GPL, built from source)
             problems.append(f"{rel}: {size} bytes exceeds {MAX_FILE_BYTES} (not on the reviewed large-file list)")
         data = path.read_bytes()
         head = data[:16]
@@ -324,7 +329,8 @@ def run_gates(tree: Path) -> list[str]:
         if len(data) > 0x8006 and data[0x8001:0x8006] == b"CD001":
             problems.append(f"{rel}: ISO9660 magic")
         if head.startswith(b"\x89PNG") or head.startswith(b"\xff\xd8\xff"):
-            if not rel.startswith(IMAGE_ALLOWED_DIRS):
+            if (not rel.startswith(IMAGE_ALLOWED_DIRS) and not any(part in "/" + rel for part in IMAGE_ALLOWED_PARTS)
+                    and rel.rsplit("/", 1)[-1] not in IMAGE_ALLOWED_NAMES):
                 problems.append(f"{rel}: image outside the reviewed screenshot directory")
         if b"\x00" in data[:4096]:
             continue  # binary: the text gates below do not apply

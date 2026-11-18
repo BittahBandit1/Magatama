@@ -53,16 +53,17 @@ inline Scale hudScale(float ratio) {
 inline float projectionAspect(float original, float ratio) { return original * (ratio/Original); }
 
 class PacketFilter {
+    static constexpr uint16_t kLeft=(2048-256)*16, kRight=(2048+256)*16; // the 512-wide picture (FBW 8)
     struct Path { uint32_t left=0, flag=0, nr=0, ri=0; uint64_t regs=0, tag=0; };
     struct Context { uint64_t frame=0, tex=0, test=0, zbuf=0; uint32_t height=224; bool frameKnown=false; };
-    struct Vertex { size_t at; bool packed, untextured; uint64_t tag; uint32_t path, height; uint16_t x,y; };
+    struct Vertex { size_t at; bool packed, untextured, deep, sprite; uint64_t tag; uint32_t path, height; uint16_t x,y,u; };
     std::array<Path,4> paths{};
     std::array<Context,2> contexts{};
-    uint32_t prim=0, prmode=0; bool ac=true;
+    uint32_t prim=0, prmode=0; bool ac=true; uint16_t u=0;
     uint64_t nextTag=0, blit=0;
     std::array<uint32_t,8> feedback{}; unsigned feedbackCount=0, feedbackNext=0;
     std::vector<Vertex> vertices;
-    std::vector<uint8_t> scratch;
+    std::vector<uint8_t> scratch, column;
     static uint64_t read64(const uint8_t* p) { uint64_t n; std::memcpy(&n,p,8); return n; }
     static uint32_t read32(const uint8_t* p) { uint32_t n; std::memcpy(&n,p,4); return n; }
     bool isFeedback(uint32_t base) const {
@@ -77,6 +78,7 @@ class PacketFilter {
     void reg(uint32_t addr, const uint8_t* p, bool packed, size_t at, uint32_t path) {
         const uint64_t v=read64(p);
         if(addr==0) { prim=v&0x7ff; return; }
+        if(addr==3) { u=uint16_t(v&0x3fff); return; }
         if(addr==0x1a) { ac=(v&1)!=0; return; }
         if(addr==0x1b) { prmode=v&0x7f8; return; }
         if(addr==0x4c || addr==0x4d) {
@@ -123,11 +125,14 @@ class PacketFilter {
         if(!(z>0xff0000u || font || menuSprite || menuBar || (overlay && (!tme || fst)))) return;
         if(tme && ((c.tex>>26)&15)>=9 && isFeedback(uint32_t(c.tex&16383))) return;
         // Native world lighting uses tiled, untextured strips at 0x0FFFFF
-        // (e.g. PRIM=0x4D, TEST=0x33801). Each tile has its own GIF tag, so
-        // per-tag full-screen bounds cannot recognize the complete effect.
-        // Keep the world-depth range native, including partial submissions;
-        // direct HUD uses Z=0 or the reserved far overlay range instead.
-        if (!tme && z > 0 && z <= 0xff0000u && !menuBar) return;
+        // (PRIM=0x4D, TEST=0x33801), one GIF tag per 64x32 tile, so per-tag
+        // full-screen bounds cannot recognize the complete effect. The menus
+        // draw their panels and the red Yes/No highlight with the very same
+        // state (load screen: a 96x11 fan at x 16..112). These world-depth
+        // vertices are marked `deep`; apply() keeps a tag native when every
+        // deep vertex sits on the 64-pixel tile grid and fits the rest to
+        // the HUD plane like any other UI.
+        const bool deep = !tme && z > 0 && z <= 0xff0000u && !menuBar;
         // Z-writing opaque untextured primitives are framebuffer clears.
         if(!tme && !(effective&64) && !(c.zbuf&(1ull<<32))) return;
         uint16_t x,y; std::memcpy(&x,p,2); std::memcpy(&y,p+(packed?4:2),2);
@@ -135,10 +140,10 @@ class PacketFilter {
         // offscreen packet data rather than treating it as an overlay.
         if(x<((2048-1024)<<4) || x>((2048+1024)<<4) ||
            y<((2048-1024)<<4) || y>((2048+1024)<<4)) return;
-        vertices.push_back({at,packed,!tme,paths[path].tag,path,c.height,x,y});
+        vertices.push_back({at,packed,!tme,deep,(effective&7)==6,paths[path].tag,path,c.height,x,y,u});
     }
 public:
-    void reset() { paths={};contexts={};prim=prmode=0;ac=true;nextTag=blit=0;feedbackCount=feedbackNext=0;vertices.clear();scratch.clear(); }
+    void reset() { paths={};contexts={};prim=prmode=0;ac=true;u=0;nextTag=blit=0;feedbackCount=feedbackNext=0;vertices.clear();scratch.clear(); }
     const uint8_t* apply(uint32_t path, const uint8_t* bytes, uint32_t size, float ratio) {
         if(!(ratio>0) || !std::isfinite(ratio) || path<1 || path>3 || !bytes || (size&15)) return bytes;
         auto& st=paths[path]; const uint64_t prior=st.left?st.tag:0;
@@ -167,9 +172,23 @@ public:
         bool copied=false;
         for(size_t first=0;first<vertices.size();) {
             size_t end=first;const auto& head=vertices[first];
-            uint16_t x0=65535,x1=0,y0=65535,y1=0;bool untextured=false;
+            uint16_t x0=65535,x1=0,y0=65535,y1=0;bool untextured=false,grid=true;
+            size_t open=SIZE_MAX;column.assign(0,0);
             while(end<vertices.size()&&vertices[end].tag==head.tag){
-                const auto& v=vertices[end++];if(!v.untextured)continue;
+                const size_t i=end;const auto& v=vertices[end++];column.push_back(0);
+                if(v.deep && (v.x<kLeft || (v.x-kLeft)%(64*16)!=0)) grid=false;
+                if(!v.untextured){
+                    // Sprite corners pair up in order; a sprite at least 4 pixels wide
+                    // over at most 2 texels is one stretched texel column (one that
+                    // spans the whole width keeps the HUD's proportions).
+                    if(!v.sprite){open=SIZE_MAX;continue;}
+                    if(open==SIZE_MAX){open=i;continue;}
+                    const auto& a=vertices[open];
+                    const bool both=std::min(v.x,a.x)<=kLeft+16 && std::max(v.x,a.x)>=kRight-16;
+                    if(!both && std::abs(int(v.u)-int(a.u))<=2*16 && std::abs(int(v.x)-int(a.x))>=4*16)
+                        column[open-first]=column[i-first]=1;
+                    open=SIZE_MAX;continue;
+                }
                 untextured=true;x0=std::min(x0,v.x);x1=std::max(x1,v.x);y0=std::min(y0,v.y);y1=std::max(y1,v.y);
             }
             // One linear scan per tag; no quadratic work for large UI fans.
@@ -178,8 +197,20 @@ public:
             const bool partial=head.tag==prior || (st.left&&head.tag==st.tag);
             for(size_t i=first;i<end;++i){const auto& v=vertices[i];
                 if(v.untextured&&(cover||partial))continue;
+                if(v.deep&&(grid||partial))continue;
                 auto mapped=[](uint16_t n,float f){return uint16_t(std::clamp<long>(std::lround(32768.f+(float(n)-32768.f)*f),0,65535));};
-                uint16_t x=mapped(v.x,scale.x),y=mapped(v.y,scale.y);
+                // Bars and panels that touch a side of the 512-wide picture keep
+                // that side on the edge of the display, so menu bands, row
+                // backgrounds and highlights run edge to edge; their other end
+                // keeps the HUD's proportions. Untextured ones always; textured
+                // ones only where the game draws the edge piece as one stretched
+                // texel column (the party rows: U 233.5..234.5 over 175 pixels),
+                // so widening it shows nothing new. A textured piece with real
+                // detail at the edge (the Money box, its label in the texture)
+                // would be stretched, so it keeps the HUD's proportions.
+                const bool atEdge=v.x<=kLeft+16 || v.x>=kRight-16;
+                const bool edge=atEdge && (v.untextured || (column[i-first] && !partial));
+                uint16_t x=edge?v.x:mapped(v.x,scale.x),y=mapped(v.y,scale.y);
                 if(x==v.x && y==v.y)continue;
                 if(!copied){scratch.assign(bytes,bytes+size);copied=true;}
                 std::memcpy(scratch.data()+v.at,&x,2);std::memcpy(scratch.data()+v.at+(v.packed?4:2),&y,2);

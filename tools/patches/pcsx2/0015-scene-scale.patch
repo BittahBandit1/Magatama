@@ -1,0 +1,78 @@
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index 0b48b4f..0c49b3b 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -139,6 +139,14 @@ u64 GSRrvGetNativeBlurCopyCount(u32 pass);
+ // to.
+ void GSRrvSetSpriteCoverage(bool on);
+ u64 GSRrvGetSpriteCoverageDraws();
++// The 3D scene at its own internal scale, the 2D drawn over it at the configured
++// one (UpscaleMultiplier): Magatama's resolution scale changes the 3D only, the
++// HUD and menus stay at the display's resolution. A draw that tests or writes
++// depth, and any draw after one until the next 2D sprite without depth, uses the
++// scene scale; other draws the configured scale. The render target is resampled
++// when a field moves between the two (the texture cache's per-target scale, as
++// for PCSX2's native scaling). 0 = off (stock). Applies from the next draw.
++void GSRrvSetSceneScale(float scale);
+ // A sprite the bridge has moved (its X is no longer the game's) cannot have the
+ // texels it spans found from its position, so the bridge finds them from the
+ // game's coordinates, writes them to U and marks the sprite: RoundSpriteOffset()
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index f944d4b..7ae176d 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -95,8 +95,17 @@ void GSRendererHW::UpdateSettings(const Pcsx2Config::GSOptions& old_config)
+ 	SetTCOffset();
+ }
+ 
++float GSRendererHW::s_rrv_scene_scale = 0.0f;
++
++void GSRrvSetSceneScale(float scale)
++{
++	// Exactly 1 would take the texture cache's native-downscale paths (integer box filter, m_downscaled).
++	GSRendererHW::s_rrv_scene_scale = scale <= 0.0f ? 0.0f : std::max(scale, 1.0001f);
++}
++
+ void GSRendererHW::VSync(u32 field, bool registers_written, bool idle_frame)
+ {
++	m_rrv_in_scene = false;
+ 	if (GSConfig.LoadTextureReplacements)
+ 		GSTextureReplacements::ProcessAsyncLoadedTextures();
+ 
+@@ -3828,6 +3837,18 @@ void GSRendererHW::Draw()
+ 		target_scale = src->m_from_target->GetScale();
+ 	}
+ 
++	// RRV (GSRrvSetSceneScale): the 3D at the scene scale, the 2D over it at the configured scale.
++	if (s_rrv_scene_scale > 0.0f && target_scale == GetTextureScaleFactor() && !IsPossibleChannelShuffle() && !m_downscale_source)
++	{
++		const bool depth = m_cached_ctx.DepthWrite() || (m_cached_ctx.TEST.ZTE && m_cached_ctx.TEST.ZTST > ZTST_ALWAYS);
++		if (depth)
++			m_rrv_in_scene = true;
++		else if (m_vt.m_primclass == GS_SPRITE_CLASS)
++			m_rrv_in_scene = false;
++		if (m_rrv_in_scene)
++			target_scale = s_rrv_scene_scale;
++	}
++
+ 	// RRV RR5 extension (fukami#2, 2026-10-11): the depth-of-field blur keeps its
+ 	// native width at an internal scale above 1. The guest (FUN_00240cb0
+ 	// -> FUN_00240a48, called from func_233240 via FUN_00240ca0; also FUN_002429d0
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.h b/pcsx2/GS/Renderers/HW/GSRendererHW.h
+index dacfc6b..d3a7637 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.h
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.h
+@@ -312,6 +312,13 @@ private:
+ 	// pass of the current draw, 0 none. Set in Draw(), read when the texture
+ 	// offset is computed (RealignTargetTextureCoordinate).
+ 	u8 m_rrv_blur_pass = 0;
++	// GSRrvSetSceneScale: a depth draw was made this field and no 2D sprite since.
++	bool m_rrv_in_scene = false;
++
++public:
++	static float s_rrv_scene_scale;
++
++private:
+ 	// RRV sprite coverage (GSRrvSetSpriteCoverage): the current draw is a
+ 	// point-sampled draw of FST sprites or textured rectangles from guest
+ 	// memory. Set in Draw(), read by RoundSpriteOffset() and when the sampler

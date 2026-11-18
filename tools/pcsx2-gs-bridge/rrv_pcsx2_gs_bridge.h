@@ -394,7 +394,8 @@ typedef struct RrvPcsx2GsBridgeUi {
     int (*set_cas)(int sharpness); // 0 = off, 1..100
     // Optional tail. Queue validated renderer settings on the GS owner; apply
     // after the current present, preserving the running game and GS memory.
-    // keys: scale, aa1, aniso, texture_filter, sprite_filter, mipmap.
+    // keys: scale, scene_scale (the 3D scene's own scale, "0" = scale; applied at once), aa1, aniso,
+    // texture_filter, sprite_filter, mipmap.
     int (*set_render_option)(const char* key, const char* value);
     // Actual renderer values on this owner, including clamped scale. Returned
     // text is valid until the next query; nullptr means unsupported key.

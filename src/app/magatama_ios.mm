@@ -389,10 +389,12 @@ int main(int argc, char **argv)
         def("MAGATAMA_IPU_WORKER_TIMING", "1");
         def("RRV_VU_AOT", "1");
         def("RRV_WINDOW_FULLSCREEN", "1");
-        // Phone defaults: 2x internal scale (the in-game menu can change it).
+        // The picture renders at the screen's resolution (Resolution scale in the in-game menu, 25-200%); this is
+        // only the renderer's first scale, until the first frame is shown.
 #if defined(MAGATAMA_IOS_LEGACY)
-        // Older devices (A10-class, 2 GB): native resolution.
+        // Older devices (A10-class, 2 GB): half the screen's resolution unless the player chose otherwise.
         def("RRV_PCSX2_GS_FULL_SCALE", "1");
+        def("MAGATAMA_RESOLUTION_SCALE_DEFAULT", "50");
 #else
         def("RRV_PCSX2_GS_FULL_SCALE", "2");
 #endif

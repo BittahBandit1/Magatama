@@ -59,6 +59,13 @@ public class MagatamaActivity extends SDLActivity {
         alive = true;
         super.onCreate(state);
         pickDisplayMode();
+        Landscape.lock(this);
+    }
+
+    /** SDL picks an orientation from the window when it is made; Magatama stays in the landscape it is locked to. */
+    @Override
+    public void setOrientationBis(int w, int h, boolean resizable, String hint) {
+        runOnUiThread(() -> Landscape.lock(this));
     }
 
     /** The refresh rate of the display mode this activity asked for (0: none was chosen, the system's current one). */
@@ -104,13 +111,33 @@ public class MagatamaActivity extends SDLActivity {
     }
 
     @Override
+    public void onConfigurationChanged(android.content.res.Configuration config) {
+        super.onConfigurationChanged(config);
+        Landscape.lock(this);
+    }
+
+    @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (hasFocus)
+            Landscape.lock(this);
         if (hasFocus)
             getWindow().getDecorView().setSystemUiVisibility(android.view.View.SYSTEM_UI_FLAG_FULLSCREEN |
                 android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
                 android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
                 android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+    }
+
+    // The game (libmain.so) is not in the APK: GameBuilder built it on this device into files/game.
+    @Override
+    public void loadLibraries() {
+        System.loadLibrary("SDL3");
+        System.load(GameBuilder.gameLibrary(this).getAbsolutePath());
+    }
+
+    @Override
+    protected String getMainSharedObject() {
+        return GameBuilder.gameLibrary(this).getAbsolutePath();
     }
 
     @Override

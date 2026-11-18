@@ -1,4 +1,58 @@
+#include <cstdio>
+#include <cstdlib>
+#include <chrono>
+#include <mutex>
 #include "rrv_guest_rtc.cpp"
+// [ee-fence] (Magatama performance): how often, why and for how long the EE thread waits for the VU1/GS owner
+// stream to drain, every 2 s. Each such wait serialises the EE behind every field's VU1 and GS work.
+namespace
+{
+struct EeFenceStats
+{
+    std::mutex mutex;
+    uint64_t count[4]{}, ns[4]{}, readNs = 0, readBytes = 0;
+    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now(), start = last;
+};
+EeFenceStats g_eeFence;
+thread_local int t_eeFenceReason = 0; // 0 other, 1 local read, 2 guest GS register write, 3 memory hook
+struct EeFenceReason
+{
+    int saved;
+    explicit EeFenceReason(int r) : saved(t_eeFenceReason) { t_eeFenceReason = r; }
+    ~EeFenceReason() { t_eeFenceReason = saved; }
+};
+void eeFenceNote(uint64_t ns, uint64_t readNs, uint64_t readBytes)
+{
+    static const bool on = [] { const char *v = std::getenv("MAGATAMA_FENCE_LOG"); return !(v && v[0] == '0'); }();
+    if (!on)
+        return;
+    std::lock_guard<std::mutex> lock(g_eeFence.mutex);
+    const int r = t_eeFenceReason & 3;
+    if (ns != ~0ull)
+    {
+        ++g_eeFence.count[r];
+        g_eeFence.ns[r] += ns;
+    }
+    g_eeFence.readNs += readNs;
+    g_eeFence.readBytes += readBytes;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_eeFence.last < std::chrono::seconds(2))
+        return;
+    const double secs = std::chrono::duration<double>(now - g_eeFence.last).count();
+    const auto ms = [&](int i) { return g_eeFence.ns[i] / 1e6 / secs; };
+    std::fprintf(stderr,
+                 "[ee-fence] t=%.0fs per second: other %.0f (%.1f ms) local-read %.0f (%.1f ms, read %.1f ms %.0f KB) "
+                 "gs-write %.0f (%.1f ms) hook %.0f (%.1f ms)\n",
+                 std::chrono::duration<double>(now - g_eeFence.start).count(), g_eeFence.count[0] / secs, ms(0),
+                 g_eeFence.count[1] / secs, ms(1), g_eeFence.readNs / 1e6 / secs, g_eeFence.readBytes / 1024.0 / secs,
+                 g_eeFence.count[2] / secs, ms(2), g_eeFence.count[3] / secs, ms(3));
+    for (int i = 0; i < 4; ++i)
+        g_eeFence.count[i] = g_eeFence.ns[i] = 0;
+    g_eeFence.readNs = g_eeFence.readBytes = 0;
+    g_eeFence.last = now;
+}
+} // namespace
+
 // RRV product SDL host overlay
 #include "ps2_runtime.h"
 #include "ps2_log.h"
@@ -777,13 +831,19 @@ bool PS2Runtime::readActiveGsBackendLocalMemory(uint8_t *dst, uint32_t byteCount
     if (!m_gsBackend.active())
         return false;
     rrv::gate4::ownerBarrier(rrv::gate4::BarrierKind::LocalRead);
-    gate4FenceV1();
+    {
+        EeFenceReason reason(1);
+        gate4FenceV1();
+    }
 
     std::string error;
+    const auto t0 = std::chrono::steady_clock::now();
     if (!m_gsBackend.readLocalMemory(dst, byteCount, bitbltbuf, trxpos, trxreg, &error))
     {
         throw std::runtime_error("PCSX2 GS bridge local-to-host transfer failed: " + error);
     }
+    eeFenceNote(~0ull, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - t0).count()), byteCount);
     return true;
 }
 
@@ -3403,9 +3463,12 @@ void PS2Runtime::run()
 // Starts the real-time pacer had to wait for: the game was ahead of real time there, so it
 // had time to spare (Magatama's 60 FPS skin budget grows only while these keep coming).
 uint64_t rrv_gate3_realtime_waits(){return gate3RealtimePacerV1().waits;}
+uint64_t rrv_gate3_realtime_starts(){return gate3RealtimePacerV1().starts;}
 
 #include "gate3_guest_admission_runtime.inc"
 #include "gate3_guest_admission_loader.inc"
+
+
 
 // ---------------------------------------------------------------------------
 // Gate-4 VU1+GS owner stream: PS2Runtime side
@@ -3520,6 +3583,7 @@ void PS2Runtime::gate4PublishOwnerV1()
         gs.siglblid = m_ownerSiglblidV1;
 }
 
+
 void PS2Runtime::gate4FenceV1()
 {
     if (m_vu1gsModeV1 == Vu1GsModeV1::Inline)
@@ -3527,7 +3591,10 @@ void PS2Runtime::gate4FenceV1()
     if (m_vu1gsModeV1 == Vu1GsModeV1::OwnerAsync)
     {
         ++m_vu1gsFencesV1;
+        const auto t0 = std::chrono::steady_clock::now();
         m_gsBackend.ownerFence();
+        eeFenceNote(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t0).count()), 0, 0);
     }
     gate4PublishOwnerV1();
 }
@@ -3536,7 +3603,10 @@ void PS2Runtime::gate4GuestGsWriteV1(uint32_t physical)
 {
     if (m_vu1gsModeV1 == Vu1GsModeV1::Inline)
         return;
-    gate4FenceV1();
+    {
+        EeFenceReason reason(2);
+        gate4FenceV1();
+    }
     if (physical >= 0x12001000u && physical < 0x12001008u)
         m_ownerCsrValidV1 = false;
     if (physical >= 0x12001080u && physical < 0x12001088u)
@@ -3612,7 +3682,7 @@ void PS2Runtime::gate4ConfigureOwnerStreamV1()
             gate4PublishOwnerV1();
         }
     };
-    hooks.fence = [this] { gate4FenceV1(); };
+    hooks.fence = [this] { EeFenceReason reason(3); gate4FenceV1(); };
     // Gate 5: RRV_VU1GS_SPLIT=1 (owner-async only) runs VIF1+VU1 on rrv-vu1 and
     // only the bridge on rrv-gs-owner (Backend::startVuSplit). Owner readbacks
     // then arrive on rrv-gs-owner, after the packet that produced them.

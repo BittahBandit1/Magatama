@@ -4317,7 +4317,29 @@ void PS2Memory::ownerPostV1(std::function<void()> command, size_t bytes, size_t 
     // The worker's byte cap bounds queued payload; a single larger command is
     // still legal (it is copied already) and is charged at the cap.
     constexpr size_t kCap = 16u * 1024u * 1024u;
+    // [owner-post] (Magatama performance): how long the posting thread (the EE) blocks in post(): a synchronous
+    // command waits for the owner (VU1/GS) to run it; an asynchronous one only for queue space. Every 2 s.
+    static const bool log = [] { const char *v = std::getenv("MAGATAMA_OWNER_POST_LOG"); return !(v && v[0] == '0'); }();
+    if (!log)
+    {
+        m_ownerStreamV1.post(std::move(command), bytes > kCap ? kCap : bytes, fields, sync);
+        return;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
     m_ownerStreamV1.post(std::move(command), bytes > kCap ? kCap : bytes, fields, sync);
+    const auto t1 = std::chrono::steady_clock::now();
+    static uint64_t n[2]{}, ns[2]{}, maxNs[2]{};
+    static auto last = t1;
+    const uint64_t d = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    ++n[sync]; ns[sync] += d; maxNs[sync] = std::max(maxNs[sync], d);
+    if (t1 - last >= std::chrono::seconds(2))
+    {
+        const double secs = std::chrono::duration<double>(t1 - last).count();
+        std::fprintf(stderr, "[owner-post] per second: sync %.0f (blocked %.1f ms, max %.2f ms) async %.0f (blocked %.1f ms, max %.2f ms)\n",
+                     n[1] / secs, ns[1] / 1e6 / secs, maxNs[1] / 1e6, n[0] / secs, ns[0] / 1e6 / secs, maxNs[0] / 1e6);
+        n[0] = n[1] = ns[0] = ns[1] = maxNs[0] = maxNs[1] = 0;
+        last = t1;
+    }
 }
 
 void PS2Memory::ownerFenceForVuWriteV1(uint32_t physAddr)

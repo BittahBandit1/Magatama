@@ -1,6 +1,7 @@
 // Magatama's launcher on Android: the app's start screen. Imports the user's own disc image (.iso, .chd or .zso),
-// picked with the system file picker, into Documents/Magatama/disc (where the game reads it), then starts the game
-// (MagatamaActivity). The importer is the same C++ one the iOS and macOS launchers use (DiscImport).
+// picked with the system file picker, into Documents/Magatama/disc (where the game reads it), builds the game from it
+// on the phone (BuildService, GameBuilder: the APK carries no game code), then starts it (MagatamaActivity). The
+// importer is the same C++ one the iOS and macOS launchers use (DiscImport).
 package dev.magatama;
 
 import android.Manifest;
@@ -40,6 +41,7 @@ public class LauncherActivity extends Activity {
     private Button playButton;
     private Button cancelButton;
     private boolean installed;
+    private boolean built;
     private volatile boolean importing;
     private volatile boolean cancelRequested;
     private String message = "";
@@ -110,6 +112,7 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        Landscape.lock(this);
         if (bringBackGame()) // the game is running: the app icon returns to it
             return;
         LinearLayout root = new LinearLayout(this);
@@ -158,7 +161,12 @@ public class LauncherActivity extends Activity {
 
         importButton.setOnClickListener(v -> onImport());
         playButton.setOnClickListener(v -> onPlay());
-        cancelButton.setOnClickListener(v -> cancelRequested = true);
+        cancelButton.setOnClickListener(v -> {
+            if (BuildService.state.running)
+                BuildService.cancel();
+            else
+                cancelRequested = true;
+        });
         setContentView(root);
         getWindow().setNavigationBarColor(0xFF1F1429);
         if (Build.VERSION.SDK_INT >= 28)
@@ -200,8 +208,16 @@ public class LauncherActivity extends Activity {
     }
 
     @Override
+    public void onConfigurationChanged(android.content.res.Configuration config) {
+        super.onConfigurationChanged(config);
+        Landscape.lock(this);
+    }
+
+    @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (hasFocus)
+            Landscape.lock(this);
         if (hasFocus)
             hideSystemBars();
     }
@@ -209,6 +225,7 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        BuildService.watch(() -> runOnUiThread(this::update));
         refresh(); // storage access may have just been granted
     }
 
@@ -224,8 +241,10 @@ public class LauncherActivity extends Activity {
         final String dir = discDir().getAbsolutePath();
         new Thread(() -> {
             final boolean ok = DiscImport.nativeInstalled(dir);
+            final boolean game = GameBuilder.built(this);
             runOnUiThread(() -> {
                 installed = ok;
+                built = game;
                 update();
             });
         }, "magatama-check").start();
@@ -233,15 +252,39 @@ public class LauncherActivity extends Activity {
 
     private void update() {
         final boolean access = hasStorageAccess();
-        progressBar.setVisibility(importing ? View.VISIBLE : View.GONE);
-        progressText.setVisibility(importing ? View.VISIBLE : View.GONE);
-        cancelButton.setVisibility(importing ? View.VISIBLE : View.GONE);
-        importButton.setVisibility(importing ? View.GONE : View.VISIBLE);
-        playButton.setVisibility(importing ? View.GONE : View.VISIBLE);
+        final BuildService.State build = BuildService.state;
+        final boolean building = build.running;
+        final boolean busy = importing || building;
+        if (build.finished) { // a build just ended: its result is the message
+            build.finished = false;
+            built = GameBuilder.built(this);
+            if (!build.error.isEmpty() && !build.error.equals("cancelled")) {
+                failed = true;
+                message = "The build failed:\n" + build.error;
+            } else if (build.error.isEmpty()) {
+                failed = false;
+                message = "Magatama is ready.";
+            } else {
+                message = "";
+            }
+        }
+        progressBar.setVisibility(busy ? View.VISIBLE : View.GONE);
+        progressText.setVisibility(busy ? View.VISIBLE : View.GONE);
+        cancelButton.setVisibility(busy ? View.VISIBLE : View.GONE);
+        importButton.setVisibility(busy ? View.GONE : View.VISIBLE);
+        playButton.setVisibility(busy ? View.GONE : View.VISIBLE);
         importButton.setText(!access ? "Allow Storage Access" : installed ? "Replace Disc" : "Import Disc");
+        playButton.setText(installed && !built ? "Build Game" : "Play");
         playButton.setEnabled(installed);
         playButton.setAlpha(installed ? 1f : 0.4f);
-        if (importing) {
+        if (building) {
+            status.setText(build.step < 0 ? "Building the game…" :
+                           "Building the game (step " + (build.step + 1) + " of " + GameBuilder.STEPS.length + "): " +
+                           build.stepName);
+            status.setTextColor(0xB3FFFFFF);
+            progressBar.setProgress(build.total > 0 ? (int) (build.done * 1000L / build.total) : 0);
+            progressText.setText(build.total > 0 ? build.done + " / " + build.total + "   " + build.what : build.what);
+        } else if (importing) {
             status.setText("Importing…");
             status.setTextColor(0xB3FFFFFF);
         } else if (!message.isEmpty()) {
@@ -251,11 +294,15 @@ public class LauncherActivity extends Activity {
             status.setText("Magatama keeps your disc, saves and settings in Documents/Magatama.\n" +
                            "Allow storage access to import your disc.");
             status.setTextColor(0x99FFFFFF);
+        } else if (installed && !built) {
+            status.setText("Disc ready. Magatama builds the game from it on this device once (this takes a while;\n" +
+                           "it goes on in the background). Tap Build Game.");
+            status.setTextColor(0x99FFFFFF);
         } else {
-            status.setText(installed ? "Disc ready" : "No disc imported yet");
+            status.setText(installed ? "Ready" : "No disc imported yet");
             status.setTextColor(installed ? 0xFF6BE38A : 0x99FFFFFF);
         }
-        getWindow().getDecorView().setKeepScreenOn(importing);
+        getWindow().getDecorView().setKeepScreenOn(busy);
     }
 
     // ---------------------------------------------------------------------------------------------- actions
@@ -277,8 +324,27 @@ public class LauncherActivity extends Activity {
     private void onPlay() {
         if (!installed)
             return;
+        if (!built) {
+            startBuild();
+            return;
+        }
         startActivity(new Intent(this, MagatamaActivity.class));
         finishAndRemoveTask();
+    }
+
+    private void startBuild() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, 2); // the progress notification
+        message = "";
+        BuildService.start(this);
+        update();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        BuildService.watch(null);
     }
 
     @Override
@@ -341,6 +407,8 @@ public class LauncherActivity extends Activity {
                 importing = false;
                 showResult(finalCode != DiscImport.OK, text);
                 refresh();
+                if (finalCode == DiscImport.OK) // a new disc: build the game from it
+                    startBuild();
             });
         }, "magatama-import").start();
     }
@@ -372,6 +440,8 @@ public class LauncherActivity extends Activity {
     public void onBackPressed() {
         if (importing)
             cancelRequested = true; // stay until the importer has cleaned up
+        else if (BuildService.state.running)
+            moveTaskToBack(true); // the build goes on in the background
         else
             super.onBackPressed();
     }

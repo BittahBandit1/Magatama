@@ -3,13 +3,20 @@
 #
 #   ANDROID_NDK=<ndk r28+> ANDROID_SDK=<sdk with build-tools + platforms> scripts/magatama_build_android.sh [stage]
 #
-# Stages (each resumes; name one to start there): deps pcsx2 bridge product apk. Output:
+# Stages (each resumes; name one to start there): deps pcsx2 bridge product tools toolchain kit apk. Output:
 #   build/android/Magatama-android-b<N>.apk     (debug-signed; N from ~/magatama/android-build-number, or
 #                                                 MAGATAMA_ANDROID_BUILD_NO)
-# Layout inside the APK:
-#   lib/arm64-v8a/  libSDL3.so libSDL2.so (sdl2-compat) libmain.so (the game) librrv-pcsx2-gs-bridge.so libc++_shared.so libmagatama_import.so (launcher)
+# The APK holds no game code: the app builds the game on the phone from the user's own disc (GameBuilder.java), with
+# the compiler it carries. Layout inside the APK:
+#   lib/arm64-v8a/  libSDL3.so libSDL2.so (sdl2-compat) librrv-pcsx2-gs-bridge.so libc++_shared.so libmagatama_import.so
+#                   (launcher); the build tools: libmg_recomp.so (ps2_recomp) libmg_vuaot.so (tools/vu-aot/vu_aot_gen.cpp)
+#                   libmg_effects.so (tools/nocturne-effects); the compiler: libmg_clang.so libmg_lld.so and their
+#                   libraries (tools/android/stage_toolchain.py)
+#   assets/build/   kit.zip (prebuilt runtime, headers, recipe: tools/android/magatama_android_kit.py) and toolchain.zip
 #   assets/game/    package/ (identity, PCSX2 resources, bound-workload.txt) + package.list (extracted on first launch)
-#   classes.dex     SDL3's Java activity (org.libsdl.app)
+#   classes.dex     SDL3's Java activity (org.libsdl.app) and the launcher (src/app/android)
+# The toolchain stage needs the Termux packages listed in tools/android/termux-toolchain.txt, unpacked into one folder:
+# MAGATAMA_ANDROID_TERMUX=<that folder>.
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 NDK="${ANDROID_NDK:?set ANDROID_NDK to an NDK (r28 or newer)}"
@@ -18,7 +25,7 @@ out="${MAGATAMA_ANDROID_OUT:-$repo/build/android}"; mkdir -p "$out"
 deps="$out/deps"; JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 API=28; TARGET_SDK=35; ABI=arm64-v8a
 start="${1:-deps}"
-stages=(deps pcsx2 bridge product apk)
+stages=(deps pcsx2 bridge product tools toolchain kit apk)
 run_from() { local s; for s in "${stages[@]}"; do [[ $s == "$start" ]] && return 0; [[ $s == "$1" ]] && return 1; done; return 0; }
 log() { echo "== $*"; }
 TC=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI=$ABI
@@ -90,7 +97,7 @@ if run_from product; then
     march="${MAGATAMA_ANDROID_MARCH--march=armv8.2-a}"
     cmake -S "$repo" -B "$product" "${TC[@]}" -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
         -DBUILD_TESTING=OFF -DRRV_BUILD_PRODUCT=ON -DRRV_PRODUCT_OWNED_SOURCE=ON -DRRV_GS_PRODUCER_CONTROL=ON \
-        -DMAGATAMA_GAME=ON -DMAGATAMA_ANDROID_DEPS="$deps" -DMAGATAMA_ANDROID_BUILD="$build_no" \
+        -DMAGATAMA_GAME=ON -DMAGATAMA_ANDROID_DEPS="$deps" -DMAGATAMA_ANDROID_BUILD="$build_no" -DRRV_NO_IPO=ON \
         -DCMAKE_C_FLAGS="$march" -DCMAKE_CXX_FLAGS="$march" \
         -DRRV_PCSX2_GS_BRIDGE_MANIFEST="$bridge_build/rrv-pcsx2-gs-bridge-manifest.json" \
         -DRRV_PCSX2_GS_BRIDGE_MANIFEST_VERIFIER="$repo/tools/android/bridge_manifest.py" \
@@ -98,8 +105,50 @@ if run_from product; then
         -DFETCHCONTENT_SOURCE_DIR_SSE2NEON="$repo/build-deps/sse2neon-92f6de1" \
         -DRRV_DISC_ZSTD_STATIC="$deps/lib/libzstd.a" -DRRV_DISC_ZSTD_INCLUDE_DIR="$deps/include" \
         > "$out/product-configure.log" 2>&1 || { grep -n "CMake Error" -A8 "$out/product-configure.log" | head -60; exit 1; }
-    cmake --build "$product" --target Fukami --parallel "$JOBS" -- -k 0 > "$out/product-build.log" 2>&1 ||
+    # The runtime only: every input of libmain.so but the game code, which the phone compiles (GameBuilder.java).
+    # No link-time optimisation (-DRRV_NO_IPO above): the phone links these objects with its own lld.
+    targets=$(ninja -C "$product" -t commands candidate-bin/libmain.so | tail -1 | tr ' ' '\n' | grep -E '\.(a|o)$' |
+              grep -v -e librrv_legacy_game_funcs.a -e nocturne_bezier -e '^/' | sort -u)
+    ninja -C "$product" -j "$JOBS" $targets > "$out/product-build.log" 2>&1 ||
         { grep -E "error:|undefined (reference|symbol)" "$out/product-build.log" | sed "s#$repo/##" | sort -u | head -80; exit 1; }
+fi
+
+# --------------------------------------------------------------- 5. build tools for the phone (as executables)
+tools="$out/tools"
+cxx="$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/clang++ | head -1)"
+if run_from tools; then
+    log "build tools -> $tools"
+    mkdir -p "$tools"
+    recompiler="$out/recompiler"
+    cmake -S "$repo" -B "$recompiler" -G Ninja -DRRV_BUILD_RECOMPILER=ON -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI=$ABI \
+        -DANDROID_PLATFORM=android-$API -DANDROID_STL=c++_static > "$out/recompiler-configure.log" 2>&1 ||
+        { tail -30 "$out/recompiler-configure.log"; exit 1; }
+    ninja -C "$recompiler" -j "$JOBS" ps2_recomp > "$out/recompiler-build.log" 2>&1 || { tail -30 "$out/recompiler-build.log"; exit 1; }
+    cp "$(find "$recompiler" -name ps2_recomp -type f | head -1)" "$tools/libmg_recomp.so"
+    src="$repo/third_party/ps2recomp"; d="$recompiler/_deps"
+    "$cxx" --target=aarch64-linux-android$API -std=c++20 -O2 -static-libstdc++ \
+        -I"$src/ps2xRecomp/include" -I"$src/ps2xRuntime/include" -I"$d/fmt-src/include" -I"$d/rabbitizer-src/include" \
+        -I"$d/rabbitizer-src/tables" "$repo/tools/nocturne-effects/generate.cpp" "$src/ps2xRecomp/src/lib/code_generator.cpp" \
+        "$src/ps2xRecomp/src/lib/r5900_decoder.cpp" "$d/fmt-build/libfmt.a" "$recompiler/ps2recomp/ps2xRecomp/librabbitizer.a" \
+        -o "$tools/libmg_effects.so"
+    "$cxx" --target=aarch64-linux-android$API -std=c++17 -O2 -static-libstdc++ "$repo/tools/vu-aot/vu_aot_gen.cpp" \
+        -o "$tools/libmg_vuaot.so"
+fi
+
+# ----------------------------------------------------------------------------- 6. the compiler for the phone
+toolchain="$out/toolchain"
+if run_from toolchain; then
+    log "toolchain -> $toolchain"
+    python3 "$repo/tools/android/stage_toolchain.py" --termux "${MAGATAMA_ANDROID_TERMUX:?unpacked Termux packages}" \
+        --ndk "$NDK" --out "$toolchain"
+fi
+
+# ----------------------------------------------------------------------------------------- 7. the build kit
+kit="$out/kit"
+if run_from kit; then
+    log "build kit -> $kit"
+    python3 "$repo/tools/android/magatama_android_kit.py" --build "$product" --deps "$deps" --ndk "$NDK" --out "$kit"
 fi
 
 # -------------------------------------------------------------------------------------------------- 5. APK
@@ -111,11 +160,9 @@ if run_from apk; then
     log "APK (build $build_no, $(basename "$bt") build-tools, $(basename "$platform"))"
     # Native libraries.
     ndk_sysroot_lib="$(ls -d "$NDK"/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android | head -1)"
-    cp "$product/candidate-bin/libmain.so" "$deps/lib/libSDL3.so" "$deps/lib/libSDL2.so" "$bridge_lib" \
-       "$ndk_sysroot_lib/libc++_shared.so" "$apkdir/lib/$ABI/"
+    cp "$deps/lib/libSDL3.so" "$deps/lib/libSDL2.so" "$bridge_lib" "$ndk_sysroot_lib/libc++_shared.so" "$apkdir/lib/$ABI/"
     # The launcher's disc importer (LauncherActivity -> DiscImport): its own small library, so the launcher never
     # loads the game. The same importer as iOS/macOS, on the product build's disc readers (libchdr, zstd, NDK zlib).
-    cxx="$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/clang++ | head -1)"
     "$cxx" --target=aarch64-linux-android$API -std=c++20 -O2 -fPIC -shared -fvisibility=hidden \
         -I"$repo/src/app" -I"$repo/build-deps/pcsx2-2.8.2/3rdparty/libchdr/include" \
         "$repo/src/app/magatama_disc_import.cpp" "$repo/src/app/android/magatama_import_jni.cpp" \
@@ -125,6 +172,11 @@ if run_from apk; then
     # Symbols stay in the build tree (crash logs give library + offset); the APK carries stripped copies.
     strip="$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip | head -1)"
     for so in "$apkdir/lib/$ABI/"*.so; do "$strip" --strip-unneeded "$so"; done
+    # The build tools and the compiler (already stripped), and what they build with.
+    cp "$tools"/libmg_*.so "$toolchain"/lib/*.so "$apkdir/lib/$ABI/"
+    mkdir -p "$apkdir/assets/build"
+    (cd "$kit" && zip -q -r -9 "$apkdir/assets/build/kit.zip" .)
+    (cd "$toolchain/toolchain" && zip -q -r -9 "$apkdir/assets/build/toolchain.zip" .)
     # The resource package (as the product's build tree staged it) and the workload file, plus the extraction list.
     cp -RL "$product/.rrv-resource-packages/current" "$apkdir/assets/game/package"
     rm -f "$apkdir/assets/game/package/"*.so # the bridge loads from lib/ (an APK's only place for code)
@@ -146,8 +198,8 @@ if run_from apk; then
     [[ "${MAGATAMA_ANDROID_DEBUGGABLE:-0}" == 1 ]] && sed -i 's/<application/<application android:debuggable="true"/' "$apkdir/AndroidManifest.xml"
     "$bt/aapt2" link -o "$apkdir/unaligned.apk" -I "$jar" --manifest "$apkdir/AndroidManifest.xml" \
         -A "$apkdir/assets" "$apkdir/res.zip" --min-sdk-version $API --target-sdk-version $TARGET_SDK
-    (cd "$apkdir" && zip -q -0 -r unaligned.apk lib && zip -q unaligned.apk classes.dex)
-    # Uncompressed, 16 KB-aligned native libraries (extractNativeLibs=false; 16 KB-page devices), then sign.
+    (cd "$apkdir" && zip -q -r unaligned.apk lib && zip -q unaligned.apk classes.dex)
+    # Compressed native libraries, unpacked at install (extractNativeLibs=true): the compiler runs from that folder.
     "$bt/zipalign" -f -P 16 4 "$apkdir/unaligned.apk" "$apkdir/aligned.apk"
     keystore="${MAGATAMA_ANDROID_KEYSTORE:-$HOME/magatama/android-debug.keystore}"
     [[ -f "$keystore" ]] || keytool -genkeypair -keystore "$keystore" -storepass android -keypass android \
@@ -156,5 +208,15 @@ if run_from apk; then
     java -jar "$bt/lib/apksigner.jar" sign --ks "$keystore" --ks-pass pass:android --key-pass pass:android \
         --ks-key-alias magatama --out "$apk" "$apkdir/aligned.apk"
     ls -l "$apk"
-    log "done: $apk"
+    # The gate: no game code in the APK (no libmain.so, no translated functions, nothing generated).
+    gate="$out/apk-gate"; rm -rf "$gate"; mkdir -p "$gate"; (cd "$gate" && unzip -q "$apk")
+    [[ ! -e "$gate/lib/$ABI/libmain.so" ]] || { echo "!! the APK has libmain.so" >&2; exit 1; }
+    nm="$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-nm | head -1)"
+    for so in "$gate/lib/$ABI/"*.so; do
+        if "$nm" -D --defined-only "$so" 2>/dev/null | grep -qE '(FUN|sub|LAB)_00[0-9a-fA-F]{6}_0x'; then
+            echo "!! $so defines translated game functions" >&2; exit 1; fi
+    done
+    if unzip -l "$apk" | grep -qiE 'generated/|SLUS_|\.elf$'; then echo "!! game files in the APK" >&2; exit 1; fi
+    rm -rf "$gate"
+    log "done: $apk (no game code)"
 fi

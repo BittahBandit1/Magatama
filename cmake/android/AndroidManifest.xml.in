@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Magatama for Android (scripts/magatama_build_android.sh fills in the @...@ values). SDL3's activity
-     (dev.magatama.MagatamaActivity adds storage access) runs the game: it loads libSDL3.so and libmain.so
-     (src/app/magatama_android.cpp) and calls SDL_main. -->
+     (dev.magatama.MagatamaActivity adds storage access) runs the game: it loads libSDL3.so and the libmain.so the
+     app built on this device from the user's disc (src/app/android/dev/magatama/GameBuilder.java) and calls SDL_main. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="@PACKAGE@"
     android:versionCode="@VERSION_CODE@"
@@ -20,16 +20,23 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <!-- Building the game from the disc runs in a foreground service with a progress notification (BuildService). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <application
         android:label="Magatama"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:requestLegacyExternalStorage="true"
         android:hardwareAccelerated="true"
-        android:extractNativeLibs="false"
+        android:extractNativeLibs="true"
         android:isGame="true"
         android:appCategory="game"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <!-- simpleperf / Android Studio can profile the game (performance work); no debugging access. -->
+        <profileable android:shell="true" />
         <activity
             android:name="dev.magatama.MagatamaActivity"
             android:label="Magatama"
@@ -40,6 +47,14 @@
             android:resizeableActivity="false"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:preferMinimalPostProcessing="true" />
+        <!-- Compiles the game on this device (GameBuilder) with the compiler in lib/. -->
+        <service
+            android:name="dev.magatama.BuildService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Compiles the game from the user's own disc image on the device" />
+        </service>
         <!-- The start screen: import the disc, then Play (src/app/android/dev/magatama/LauncherActivity.java). -->
         <activity
             android:name="dev.magatama.LauncherActivity"

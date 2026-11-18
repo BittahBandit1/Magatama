@@ -11,8 +11,7 @@ Magatama is built on [Fukami](https://github.com/danisandoval/fukami), the Ridge
 > (USA), dumped from a disc you own. Magatama is not affiliated with, authorised or endorsed by Atlus, Sega or Sony.
 > See [LEGAL.md](LEGAL.md).
 
-> **Status: work in progress.** Much of the game plays, but Magatama is a developer preview: there are no official
-> releases yet, you build it yourself, and you will find bugs.
+> **Status: work in progress.** Much of the game plays, but Magatama is a developer preview and you will find bugs.
 
 ## Features
 
@@ -47,11 +46,22 @@ x86-64 Builds have not been made or tested at this time.
 
 ## Getting started
 
-There are no prebuilt downloads yet. To build Magatama you need your own `SLUS_209.11` (the executable in the root of
-the disc); everything game-derived is generated from it on your computer. See [BUILDING.md](BUILDING.md).
+Nothing Magatama distributes contains game code: the installers translate and compile the game on your own machine,
+from your own disc image (`.iso`, `.chd` or `.zso` of Shin Megami Tensei: Nocturne, USA).
 
-Once built, the launcher's **Import Disc** button takes your disc image. On iPhone and iPad the disc, saves, settings
-and logs are in the app's folder in the Files app; on Android they are in `Documents/Magatama`.
+- **macOS:** download `Magatama-<version>-macOS-Installer.zip` from the releases, open **Magatama Installer** and drop
+  your disc image on it. It needs Apple's Command Line Tools (it offers to install them) and takes a few minutes; then
+  open Magatama from your Applications folder. The disc, saves, settings and logs are in
+  `~/Library/Application Support/Magatama`.
+- **Android:** install the APK, tap **Import Disc**, pick your disc image, then **Build Game**. The first build compiles
+  the game on the device and takes a while (around an hour on a Snapdragon 865; it goes on in the background with a
+  notification); app updates usually only need a short relink. The disc, saves, settings and logs are in
+  `Documents/Magatama`.
+- **iPhone, iPad and Linux:** build it yourself ([BUILDING.md](BUILDING.md)). On iPhone and iPad the disc, saves,
+  settings and logs are in the app's folder in the Files app.
+
+To build Magatama from source you need your own `SLUS_209.11` (the executable in the root of the disc); everything
+game-derived is generated from it on your computer. See [BUILDING.md](BUILDING.md).
 
 ## Known Issues & General Notes
 - In rare cases, the interpolation does not properly apply upon startup. Many animations still update at 30 frames per second in this glitched state. Reboot the game to fix.

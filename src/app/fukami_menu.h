@@ -91,6 +91,7 @@ public:
 
 private:
     void runDiagnostic(const RrvPcsx2GsBridgeUi &ui);
+    void followDisplay(const RrvPcsx2GsBridgeUi &ui);
     void reload();
     void drawRow(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, int id);
     void change(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, const std::string &value);
@@ -126,6 +127,9 @@ private:
 
     // GS owner thread only.
     uint64_t m_diagnosticFrame = 0;
+    // The renderer's scale that follows the screen (followDisplay): applied, waiting to settle, and the menu's line.
+    std::string m_resolutionApplied, m_resolutionPending, m_resolutionText;
+    int m_resolutionFrames = 0;
     bool m_wasOpen = false;
     enum class Confirmation { none, quit, restart };
     Confirmation m_confirmation = Confirmation::none;

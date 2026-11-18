@@ -326,8 +326,18 @@ const std::vector<Spec> &schema()
         {"rendering", "frame_rate", "Frame rate (experimental)",
          "60: characters and camera get an in-between pose every other field. Effects and 2D stay at 30. Restart to apply.",
          Kind::choice, "30", {"30", "60"}, 0, 0, Apply::restart},
+        // The renderer's starting multiple of the PS2's own resolution (ini and command line only). The game follows
+        // resolution_scale below as soon as its first frame is shown (fukami_menu.cpp, Menu::followDisplay).
         {"rendering", "scale", "Rendering resolution", "Internal rendering scale: 1x native through 8x. Higher is sharper and uses more GPU memory.",
-         Kind::integer, "4", {}, 1, 8, Apply::live},
+         Kind::integer, "4", {}, 1, 8, Apply::live, false},
+        // The 3D renders at the resolution of the screen (or window) it is shown on, times this percentage; the HUD,
+        // menus and text always at the screen's own (fukami_menu.cpp, Menu::followDisplay). 100 = one rendered pixel
+        // per screen pixel. Never below the PS2's own 640x448, never above 8x it.
+        {"rendering", "resolution_scale", "3D resolution scale (%)",
+         "The 3D scene's resolution, as a percentage of your screen's. The HUD, menus and text always render at your "
+         "screen's own resolution. Lower is faster; above 100% is sharper (supersampling) and uses more GPU memory. "
+         "Never below the PS2's own resolution.",
+         Kind::integer, "100", {}, 25, 200, Apply::live},
         {"rendering", "aa1", "Edge anti-aliasing (AA1)", "PCSX2's emulation of the PS2's AA1 edge smoothing.",
          Kind::boolean, "true", {}, 0, 0, Apply::live},
         {"rendering", "fxaa", "FXAA", "Smooths jagged edges on the finished picture.",
@@ -515,6 +525,9 @@ bool valid(const Spec &spec, std::string_view value)
         return value == "fixed" || value == "race" || value == "stretch" || value == "no47";
     if (key == "scale")
         return value.size() == 1 && value[0] >= '1' && value[0] <= '8';
+    if (key == "resolution_scale")
+        return value.size() <= 3 && matches(value, "[0-9]+") && std::stoi(std::string(value)) >= 25 &&
+               std::stoi(std::string(value)) <= 200;
     if (key == "cas")
         return matches(value, "[0-9]+") && std::stoll(std::string(value).substr(0, 18)) <= 100;
     if (spec.section == "audio" && key == "volume")
@@ -593,6 +606,7 @@ const std::map<std::string, std::string> &messages()
         {"refresh_rate", "refresh_rate must be auto, 60, 120, 180, 240 or off"},
         {"vrr", "vrr must be auto, on or off"},
         {"scale", "scale must be 1 to 8"},
+        {"resolution_scale", "resolution_scale must be 25 to 200 (% of the screen's resolution)"},
         {"cas", "cas must be 0 to 100 (0 = off)"},
         {"volume", "volume must be 0 to 100 (%)"},
         {"aniso", "aniso must be 0, 2, 4, 8 or 16"},

@@ -2058,7 +2058,8 @@ void SdlPresentation::destroy()
         // settings file is read anew. restart() returns only on failure.
         std::fprintf(stderr, "[fukami-menu] restarting to apply settings\n");
         std::fflush(nullptr);
-        if (!fukami::app::inApp() && fukami::app::detail::terminalRestartEnabled())
+        // A launcher that restarts the game itself (magatama_run.sh, the Magatama.app launcher) asks for exit 75.
+        if (fukami::app::detail::terminalRestartEnabled())
             std::exit(fukami::app::detail::kTerminalRestartExit);
         fukami::app::restart();
         std::fprintf(stderr, "[fukami-menu] restart failed; relaunch the app\n");

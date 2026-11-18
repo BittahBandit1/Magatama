@@ -1,0 +1,17 @@
+# The compiler the Android app runs on the phone (tools/android/stage_toolchain.py): Termux's aarch64 packages,
+# from https://packages.termux.dev/apt/termux-main (main, aarch64). Unpack every .deb's data.tar.* into one folder and
+# pass it as MAGATAMA_ANDROID_TERMUX to scripts/magatama_build_android.sh. Versions used for Magatama b38:
+clang 21.1.8-3
+lld 21.1.8-3
+libllvm 21.1.8-3
+libcompiler-rt 21.1.8-3
+libc++ 30
+libffi 3.8.1
+libxml2 2.15.4-1
+ncurses 6.6.20260307+really6.5.20250830
+zlib 1.4
+zstd 1.5.7-1
+liblzma 5.8.4
+libiconv 1.19.1
+libandroid-glob 0.6-3
+libandroid-support 29-1

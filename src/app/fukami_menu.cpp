@@ -122,7 +122,8 @@ bool appliesLive(std::string_view section, std::string_view key)
     return (section == "display" && (key == "fullscreen" || key == "aspect" || key == "integer_scaling" || key == "nocturne_aspect")) ||
            (section == "audio" && (key == "volume" || key == "mute")) ||
            (section == "input" && key == "touch_controls") ||
-           (section == "rendering" && (key == "fxaa" || key == "cas" || key == "metal_hud" || key == "scale" || key == "aa1" || key == "aniso" ||
+           (section == "rendering" && (key == "fxaa" || key == "cas" || key == "metal_hud" || key == "scale" ||
+                                         key == "resolution_scale" || key == "aa1" || key == "aniso" ||
                                          key == "texture_filter" || key == "sprite_filter" || key == "mipmap"));
 }
 
@@ -170,6 +171,13 @@ Menu::Menu(std::filesystem::path ini, const std::filesystem::path &defaults) :
     // Show the actual launch overrides, including Terminal's 8x default.
     if (const char* scale = std::getenv("RRV_PCSX2_GS_FULL_SCALE"); scale && *scale)
         m_launch[id("rendering", "scale")] = scale;
+    // MAGATAMA_RESOLUTION_SCALE overrides the saved percentage for this run; MAGATAMA_RESOLUTION_SCALE_DEFAULT is a
+    // platform's default when the ini has none (legacy iPhones).
+    if (const char* forced = std::getenv("MAGATAMA_RESOLUTION_SCALE"); forced && *forced)
+        m_launch[id("rendering", "resolution_scale")] = forced;
+    else if (const char* platform = std::getenv("MAGATAMA_RESOLUTION_SCALE_DEFAULT");
+             platform && *platform && !(doc && doc->get("rendering", "resolution_scale")))
+        m_launch[id("rendering", "resolution_scale")] = platform;
     if (const char* aspect = std::getenv("MAGATAMA_ASPECT"); aspect && *aspect)
         m_launch[id("display", "nocturne_aspect")] = std::string(aspect) == "off" ? "4:3" : aspect;
     m_values = m_launch;
@@ -336,6 +344,7 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
         }
     }
     runDiagnostic(ui);
+    followDisplay(ui);
     std::deque<Input> inputs;
     {
         std::lock_guard<std::mutex> lock(m_inputMutex);
@@ -579,6 +588,15 @@ void Menu::drawRow(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, int
                 change(ui, spec, kEven[index]);
             break;
         }
+        if (spec.section == "rendering" && spec.key == "resolution_scale")
+        {
+            // Steps of 5%; the renderer follows a moment after the slider stops (followDisplay).
+            if (ui.slider_int(label.c_str(), &number, min, max))
+                change(ui, spec, std::to_string(std::clamp((number + 2) / 5 * 5, min, max)));
+            ui.tooltip(help.c_str());
+            ui.text_disabled(m_resolutionText.c_str());
+            break;
+        }
         if (ui.slider_int(label.c_str(), &number, min, max))
             change(ui, spec, std::to_string(number));
         break;
@@ -650,9 +668,59 @@ bool Menu::applyLive(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, c
         m_metalHudRequest.store(settings::boolValue(value) ? 1 : 0); // the host sets it on the window's layer
     else if (spec.section == "input" && spec.key == "touch_controls")
         m_touchControlsRequest.store(settings::boolValue(value) ? 1 : 0); // the host's on-screen pad
+    else if (spec.section == "rendering" && spec.key == "resolution_scale")
+        return true; // followDisplay() turns it into the renderer's scale on the next frames
     else if (spec.section == "rendering" && appliesLive(spec.section, spec.key))
         return ui.set_render_option && ui.set_render_option(std::string(spec.key).c_str(), value.c_str());
     return true;
+}
+
+// The renderer follows the screen. The 2D (HUD, menus, text) always renders at the drawable's resolution (the display
+// in fullscreen, the window otherwise): `scale`, a multiple of the PS2's 640x448 picture from 1x to 8x. The 3D scene
+// renders at that times resolution_scale: `scene_scale` (the bridge's GSRrvSetSceneScale; "0" at 100%). A bridge
+// without scene_scale gets the whole picture at the scene's scale. Runs every frame; a new value is applied once it
+// has held for a third of a second (a resized window, a slider being dragged), as each change rebuilds the renderer's
+// targets.
+void Menu::followDisplay(const RrvPcsx2GsBridgeUi &ui)
+{
+    if (!ui.set_render_option || ui.display_width < 1.0f || ui.display_height < 1.0f)
+        return;
+    if (const char *test = std::getenv("MAGATAMA_MENU_TEST"); test && std::strcmp(test, "resolution") == 0)
+        return; // that check sets the scale itself
+    if (const char *follow = std::getenv("MAGATAMA_RESOLUTION_FOLLOW"); follow && follow[0] == '0')
+        return; // tests: keep the launch scale (RRV_PCSX2_GS_FULL_SCALE)
+    const long percent = std::clamp<long>(toLong(m_values[id("rendering", "resolution_scale")], 100), 25, 200);
+    const bool deck = settings::steamDeck(); // even scales only there (settings::hostScale)
+    const auto clampScale = [deck](double s) {
+        s = std::clamp(s, 1.0, 8.0);
+        return deck ? std::clamp(std::round(s / 2.0) * 2.0, 2.0, 8.0) : s;
+    };
+    const double fit = std::min(ui.display_width / 640.0, ui.display_height / 448.0);
+    const double hud = clampScale(fit), scene = clampScale(fit * static_cast<double>(percent) / 100.0);
+    char hudText[16], sceneText[16], wanted[40];
+    std::snprintf(hudText, sizeof hudText, "%.2f", hud);
+    std::snprintf(sceneText, sizeof sceneText, "%.2f", scene);
+    std::snprintf(wanted, sizeof wanted, "%s/%s", hudText, sceneText);
+    m_resolutionText = "3D at " + std::to_string(static_cast<int>(std::lround(640 * scene))) + "x" +
+                       std::to_string(static_cast<int>(std::lround(448 * scene))) + " (" + sceneText +
+                       "x the PS2's); HUD and text at " + std::to_string(static_cast<int>(ui.display_width)) + "x" +
+                       std::to_string(static_cast<int>(ui.display_height)) + ", the screen's own.";
+    if (m_resolutionApplied == wanted)
+        return;
+    if (m_resolutionPending != wanted)
+    {
+        m_resolutionPending = wanted;
+        m_resolutionFrames = 0;
+    }
+    if (!m_resolutionApplied.empty() && ++m_resolutionFrames < 20)
+        return;
+    const bool sameScale = std::strcmp(hudText, sceneText) == 0;
+    const bool split = ui.set_render_option("scene_scale", sameScale ? "0" : sceneText) != 0;
+    const bool ok = ui.set_render_option("scale", split ? hudText : sceneText) != 0;
+    std::fprintf(stderr, "[fukami-menu] resolution: %ld%% of %.0fx%.0f -> HUD %s, 3D %s%s\n", percent,
+                 static_cast<double>(ui.display_width), static_cast<double>(ui.display_height), hudText, sceneText,
+                 split ? "" : ok ? " (whole picture: no scene_scale in this bridge)" : " (not applied)");
+    m_resolutionApplied = wanted; // also when not applied: do not ask again every frame
 }
 
 bool Menu::pendingRestart(const settings::Spec &spec) const

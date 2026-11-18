@@ -51,6 +51,11 @@ elseif(APPLE)
         message(FATAL_ERROR "Product SDL requires one native macOS architecture: arm64 or x86_64")
     endif()
     set(RRV_SDL_PREFIX "${CMAKE_SOURCE_DIR}/runtime-deps/sdl/${RRV_SDL_VERSION}/macos-${RRV_SDL_ARCH}")
+    # The macOS release (scripts/magatama_macos_release.sh) builds SDL from source for its oldest supported macOS.
+    if(MAGATAMA_MACOS_SDL_PREFIX)
+        set(RRV_SDL_PREFIX "${MAGATAMA_MACOS_SDL_PREFIX}")
+        set(RRV_SDL_VERIFY_RESULT 0)
+    else()
     execute_process(
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/prepare_sdl.py"
             --verify --prefix "${RRV_SDL_PREFIX}" --platform "macos-${RRV_SDL_ARCH}"
@@ -62,6 +67,7 @@ elseif(APPLE)
             "Stable SDL installation is missing or invalid: ${RRV_SDL_VERIFY_ERROR}"
             "Run python3 scripts/prepare_sdl.py --prepare before configuring the product.")
     endif()
+    endif()
     add_library(SDL2::SDL2 SHARED IMPORTED)
     set_target_properties(SDL2::SDL2 PROPERTIES
         IMPORTED_LOCATION "${RRV_SDL_PREFIX}/lib/libSDL2-2.0.0.dylib"
@@ -69,8 +75,10 @@ elseif(APPLE)
         INTERFACE_INCLUDE_DIRECTORIES "${RRV_SDL_PREFIX}/include/SDL2")
     # Reconfigure when the installed receipt changes. No FetchContent SDL runtime
     # directory is part of this graph; CMake derives RPATH from the imported prefix.
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${RRV_SDL_PREFIX}/manifest.json")
+    if(NOT MAGATAMA_MACOS_SDL_PREFIX)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${RRV_SDL_PREFIX}/manifest.json")
+    endif()
 elseif(WIN32)
     # Windows x86-64: the official SDL 2.32.10 Visual C++ package (SDL2.dll + SDL2.lib), installed once outside the
     # disposable build trees by scripts/prepare_sdl.py, which pins its SHA-256 in the lock. Configure is offline and

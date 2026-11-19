@@ -112,8 +112,11 @@ void loadEnvFile(const fs::path &docs)
                        "# Extra software-render helper threads in the graphics library (default 3):\n"
                        "#RRV_PCSX2_GS_SW_THREADS=1\n"
                        "#\n"
-                       "# VU1 and graphics on two separate threads instead of one (default off):\n"
-                       "#RRV_VU1GS_SPLIT=1\n"
+                       "# VU1 and graphics on one thread instead of two (slower; default off):\n"
+                       "#RRV_VU1GS_SPLIT=0\n"
+                       "#\n"
+                       "# Let the game build the next frame while the last one is still drawing (experimental; default off):\n"
+                       "#MAGATAMA_FINISH_RUNAHEAD=1\n"
                        "#\n"
                        "# What the Metal HUD shows (Apple's metric names, comma-separated; the default adds thermal):\n"
                        "#MTL_HUD_ELEMENTS=device,fps,frameinterval,gputime,frameintervalgraph\n",
@@ -373,6 +376,9 @@ int main(int argc, char **argv)
         def("RRV_PCSX2_GS_VSYNC", "1");
         def("RRV_GS_EXECUTION", "worker-sync");
         def("RRV_VU1GS_EXECUTION", "owner-async");
+        // VU1 on its own thread, the field boundary queued behind it (as on Android): the GS owner no longer runs
+        // VU1 too, and the EE does not wait for each field to drain (the iPhone 8 log of b29: 110 ms a second).
+        def("RRV_VU1GS_SPLIT", "1");
         def("RRV_FUKAMI_INI", (docs / "magatama.ini").string());
         def("MTL_SHADER_DEPTH_WORKAROUND", "0");
         // The Metal HUD, with the device's thermal state among its metrics (Apple's "thermal" element). Any MTL_HUD_*

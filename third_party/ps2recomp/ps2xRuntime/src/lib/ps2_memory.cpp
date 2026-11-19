@@ -46,6 +46,7 @@ inline void QuietBumpProducer() {
 #include <string>
 #include <vector>
 #include "runtime/rrv_ipu.h"
+namespace { void ownerHookNote(uint32_t address); } // [owner-hook], defined below
 namespace ps2_syscalls { void magatamaDeferDmacCause(uint32_t cause); }
 namespace rrv::ipu_worker_timing {
 void configure(Schedule schedule,std::function<void(unsigned)> interrupt) {
@@ -1599,7 +1600,27 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
     if (address >= 0x10003C00u && address < 0x10003E00u)
     {
-        ownerFenceV1(); // VIF1 registers are owner state
+        // VIF1_STAT (0x10003C00): only its FDR bit (23, FIFO direction) is writable. Nocturne writes it twice a frame
+        // around its frame readback (FDR=1, then FDR=0). Not draining VU1/GS for those writes made the Nova flash
+        // (a full-screen haze popping in about once a second while moving: 117 brightness jumps in 12 s, 0 with the
+        // drain). Only the write that SETS FDR (the readback starting) needs it; the one clearing it afterwards does
+        // not. Nova, save 3 walking, 12 s recorded: drain both 0 flashes / 114.5 fields per 2 s; drain the set only
+        // 0 / 120.8; drain the clear only 19 / 112.7. MAGATAMA_VIF1_STAT_FENCE: "set" (default), 1 always, 0 never,
+        // "clear" only for writes that clear FDR.
+        static const int statFence = [] {
+            const char *v = std::getenv("MAGATAMA_VIF1_STAT_FENCE");
+            if (!v || !v[0] || v[0] == 's') return 2;
+            if (v[0] == '1') return 1;
+            if (v[0] == '0') return 0;
+            return 3;
+        }();
+        const bool fdr = (value & 0x00800000u) != 0;
+        if (address != 0x10003C00u || statFence == 1 || (statFence == 2 && fdr) || (statFence == 3 && !fdr))
+        {
+            if (ownerStreamV1())
+                ownerHookNote(address == 0x10003C00u ? (fdr ? 0x10003C01u : 0x10003C00u) : address);
+            ownerFenceV1(); // VIF1 registers are owner state
+        }
         m_vifWriteCount.fetch_add(1, std::memory_order_relaxed);
 
         switch (address)
@@ -4342,10 +4363,47 @@ void PS2Memory::ownerPostV1(std::function<void()> command, size_t bytes, size_t 
     }
 }
 
+namespace
+{
+// [owner-hook] (Magatama performance): which EE writes drain the VU1/GS owner stream (VIF1 registers, VU1
+// memory), by address, every 2 s. Off with MAGATAMA_FENCE_LOG=0.
+void ownerHookNote(uint32_t address)
+{
+    static const bool on = [] { const char *v = std::getenv("MAGATAMA_FENCE_LOG"); return !(v && v[0] == '0'); }();
+    if (!on)
+        return;
+    static std::mutex mutex;
+    static std::map<uint32_t, uint64_t> counts;
+    static auto last = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(mutex);
+    ++counts[address >= 0x11000000u && address < 0x11010000u ? (address & ~0xFFFu) : address];
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(2))
+        return;
+    std::vector<std::pair<uint64_t, uint32_t>> top;
+    for (const auto &[a, n] : counts)
+        top.push_back({n, a});
+    std::sort(top.rbegin(), top.rend());
+    std::string line;
+    for (size_t i = 0; i < top.size() && i < 6; ++i)
+    {
+        char item[48];
+        std::snprintf(item, sizeof item, " %08x:%llu", top[i].second, (unsigned long long)top[i].first);
+        line += item;
+    }
+    std::fprintf(stderr, "[owner-hook] 2s:%s\n", line.c_str());
+    counts.clear();
+    last = now;
+}
+} // namespace
+
 void PS2Memory::ownerFenceForVuWriteV1(uint32_t physAddr)
 {
     if (ownerStreamV1() && physAddr >= PS2_VU1_CODE_BASE && physAddr < PS2_VU1_DATA_BASE + PS2_VU1_DATA_SIZE)
+    {
+        ownerHookNote(physAddr);
         ownerFenceV1();
+    }
 }
 
 // processPendingTransfers() with an owner stream. Same decisions and the same

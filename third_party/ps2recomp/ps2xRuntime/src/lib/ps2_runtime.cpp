@@ -10,11 +10,16 @@ namespace
 struct EeFenceStats
 {
     std::mutex mutex;
-    uint64_t count[4]{}, ns[4]{}, readNs = 0, readBytes = 0;
+    uint64_t count[8]{}, ns[8]{}, readNs = 0, readBytes = 0;
     std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now(), start = last;
 };
 EeFenceStats g_eeFence;
-thread_local int t_eeFenceReason = 0; // 0 other, 1 local read, 2 guest GS register write, 3 memory hook
+// MAGATAMA_FINISH_RUNAHEAD (EE thread only). Kept out of PS2Runtime: the phone build compiles the game against
+// the runtime's headers once and reuses those objects, so the class layout must not change between app updates.
+uint64_t g_lastOwnerSeqV1 = 0, g_runaheadSeqV1 = 0;
+thread_local int t_eeFenceReason = 0; // 0 other, 1 local read, 2 guest GS register write, 3 memory hook,
+                                     // 4 CSR read, 5 interrupt check (IMR unmasks a GS cause), 6 SIGLBLID read,
+                                     // 7 FINISH run-ahead wait
 struct EeFenceReason
 {
     int saved;
@@ -27,7 +32,7 @@ void eeFenceNote(uint64_t ns, uint64_t readNs, uint64_t readBytes)
     if (!on)
         return;
     std::lock_guard<std::mutex> lock(g_eeFence.mutex);
-    const int r = t_eeFenceReason & 3;
+    const int r = t_eeFenceReason & 7;
     if (ns != ~0ull)
     {
         ++g_eeFence.count[r];
@@ -42,11 +47,13 @@ void eeFenceNote(uint64_t ns, uint64_t readNs, uint64_t readBytes)
     const auto ms = [&](int i) { return g_eeFence.ns[i] / 1e6 / secs; };
     std::fprintf(stderr,
                  "[ee-fence] t=%.0fs per second: other %.0f (%.1f ms) local-read %.0f (%.1f ms, read %.1f ms %.0f KB) "
-                 "gs-write %.0f (%.1f ms) hook %.0f (%.1f ms)\n",
+                 "gs-write %.0f (%.1f ms) hook %.0f (%.1f ms) csr-read %.0f (%.1f ms) irq-check %.0f (%.1f ms) siglblid %.0f (%.1f ms) "
+                 "runahead %.0f (%.1f ms)\n",
                  std::chrono::duration<double>(now - g_eeFence.start).count(), g_eeFence.count[0] / secs, ms(0),
                  g_eeFence.count[1] / secs, ms(1), g_eeFence.readNs / 1e6 / secs, g_eeFence.readBytes / 1024.0 / secs,
-                 g_eeFence.count[2] / secs, ms(2), g_eeFence.count[3] / secs, ms(3));
-    for (int i = 0; i < 4; ++i)
+                 g_eeFence.count[2] / secs, ms(2), g_eeFence.count[3] / secs, ms(3), g_eeFence.count[4] / secs, ms(4),
+                 g_eeFence.count[5] / secs, ms(5), g_eeFence.count[6] / secs, ms(6), g_eeFence.count[7] / secs, ms(7));
+    for (int i = 0; i < 8; ++i)
         g_eeFence.count[i] = g_eeFence.ns[i] = 0;
     g_eeFence.readNs = g_eeFence.readBytes = 0;
     g_eeFence.last = now;
@@ -824,12 +831,83 @@ void PS2Runtime::submitActiveGsBackendRegisterPairs(const uint64_t *pairs, uint3
     copyBridgeReadback(*this, m_gsBackend, "HLE register submission");
 }
 
+// A GS-to-host read the guest repeats every frame (Nocturne reads the 512x224 depth buffer each field, about
+// 450 KB) normally waits for the whole VU1/GS queue to drain and then for the GPU: 3-6 ms of the EE's frame on a
+// phone. MAGATAMA_STALE_LOCAL_READ (default on) answers a repeat of the last read from the copy taken one frame
+// earlier and queues the next copy behind the stream, so the EE never waits for it. A first read, a different
+// transfer, or a copy older than 100 ms is read as before.
+namespace
+{
+struct StaleLocalRead
+{
+    std::mutex mutex;
+    uint64_t key[4]{};
+    std::vector<uint8_t> bytes;
+    std::chrono::steady_clock::time_point at{};
+    bool valid = false, pending = false;
+    uint64_t served = 0, refreshed = 0;
+};
+StaleLocalRead g_staleLocalRead;
+bool staleLocalReadEnabled()
+{
+    static const bool on = [] { const char *v = std::getenv("MAGATAMA_STALE_LOCAL_READ"); return !(v && v[0] == '0'); }();
+    return on;
+}
+} // namespace
+
 bool PS2Runtime::readActiveGsBackendLocalMemory(uint8_t *dst, uint32_t byteCount,
                                                 uint64_t bitbltbuf, uint64_t trxpos,
                                                 uint64_t trxreg)
 {
     if (!m_gsBackend.active())
         return false;
+    const uint64_t key[4] = {bitbltbuf, trxpos, trxreg, byteCount};
+    const bool stale = staleLocalReadEnabled() && m_vu1gsModeV1 == Vu1GsModeV1::OwnerAsync;
+    if (stale)
+    {
+        auto &cache = g_staleLocalRead;
+        std::unique_lock<std::mutex> lock(cache.mutex);
+        if (cache.valid && std::memcmp(cache.key, key, sizeof(key)) == 0 && cache.bytes.size() == byteCount &&
+            std::chrono::steady_clock::now() - cache.at < std::chrono::milliseconds(100))
+        {
+            std::memcpy(dst, cache.bytes.data(), byteCount);
+            ++cache.served;
+            if (!cache.pending)
+            {
+                cache.pending = true;
+                lock.unlock();
+                m_memory.ownerPostV1([this, byteCount, bitbltbuf, trxpos, trxreg] {
+                    const bool queued = m_gsBackend.readLocalMemoryAsync(byteCount, bitbltbuf, trxpos, trxreg,
+                        [](bool ok, std::vector<uint8_t> &&bytes) {
+                            auto &c = g_staleLocalRead;
+                            std::lock_guard<std::mutex> guard(c.mutex);
+                            if (ok)
+                            {
+                                c.bytes = std::move(bytes);
+                                c.at = std::chrono::steady_clock::now();
+                                ++c.refreshed;
+                            }
+                            else
+                                c.valid = false;
+                            c.pending = false;
+                        });
+                    if (!queued)
+                    {
+                        std::lock_guard<std::mutex> guard(g_staleLocalRead.mutex);
+                        g_staleLocalRead.valid = g_staleLocalRead.pending = false;
+                    }
+                }, 0u, 0u, false);
+            }
+            static uint64_t lastReport = 0;
+            if (cache.served >= lastReport + 600)
+            {
+                lastReport = cache.served;
+                std::fprintf(stderr, "[stale-read] served=%llu refreshed=%llu (%u bytes)\n",
+                             (unsigned long long)cache.served, (unsigned long long)cache.refreshed, byteCount);
+            }
+            return true;
+        }
+    }
     rrv::gate4::ownerBarrier(rrv::gate4::BarrierKind::LocalRead);
     {
         EeFenceReason reason(1);
@@ -844,6 +922,18 @@ bool PS2Runtime::readActiveGsBackendLocalMemory(uint8_t *dst, uint32_t byteCount
     }
     eeFenceNote(~0ull, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                            std::chrono::steady_clock::now() - t0).count()), byteCount);
+    if (stale)
+    {
+        auto &cache = g_staleLocalRead;
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        if (!cache.pending)
+        {
+            std::memcpy(cache.key, key, sizeof(key));
+            cache.bytes.assign(dst, dst + byteCount);
+            cache.at = std::chrono::steady_clock::now();
+            cache.valid = true;
+        }
+    }
     return true;
 }
 
@@ -3566,9 +3656,11 @@ void PS2Runtime::gate4StoreReadbackV1(uint64_t csr, uint64_t siglblid)
         m_memory.gs().siglblid = siglblid;
         return;
     }
-    m_ownerCsrV1 = csr;
-    m_ownerSiglblidV1 = siglblid;
-    m_ownerCsrValidV1 = m_ownerSiglblidValidV1 = true;
+    // Release stores: the EE's fast CSR read (gate3MmioReadV1) reads these without a fence.
+    __atomic_store_n(&m_ownerCsrV1, csr, __ATOMIC_RELEASE);
+    __atomic_store_n(&m_ownerSiglblidV1, siglblid, __ATOMIC_RELEASE);
+    __atomic_store_n(&m_ownerSiglblidValidV1, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&m_ownerCsrValidV1, true, __ATOMIC_RELEASE);
 }
 
 void PS2Runtime::gate4PublishOwnerV1()
@@ -3674,6 +3766,7 @@ void PS2Runtime::gate4ConfigureOwnerStreamV1()
 #endif
             },
             bytes, fields);
+        g_lastOwnerSeqV1 = sequence;
         if (m_vu1gsModeV1 == Vu1GsModeV1::OwnerSync || sync)
         {
             if (m_vu1gsModeV1 == Vu1GsModeV1::OwnerAsync)

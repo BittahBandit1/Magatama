@@ -242,6 +242,11 @@ namespace rrv::gsbackend
         bool readLocalMemory(uint8_t *outBytes, uint32_t byteCount,
                              uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg,
                              std::string *error);
+        // The same read queued behind everything the owner stream has queued so far, for a caller ON the owner
+        // stream (the GS owner, or rrv-vu1 with the VU1/GS split): it never blocks; `done` runs on the GS owner
+        // thread with the bytes (ok=false: the bridge refused). False when not called from the owner stream.
+        bool readLocalMemoryAsync(uint32_t byteCount, uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg,
+                                  std::function<void(bool ok, std::vector<uint8_t> &&bytes)> done);
         // Complete 4 MiB GS local-memory state for RRV snapshot/restore.
         // Calls are serialized with packet submission, readback and vsync.
         bool snapshotLocalMemory(std::vector<uint8_t> &outBytes, std::string *error);

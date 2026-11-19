@@ -14,6 +14,7 @@
 #include <sys/resource.h>
 #include <unistd.h>
 #include <vector>
+#include <string>
 extern "C" void rrv_set_field_work_hook(void (*hook)(long long work_ns)); // gate3 real-time pacer
 #endif
 namespace rrv {
@@ -106,8 +107,38 @@ inline void macInteractiveQos() {
         std::fprintf(stderr,"[perf-cores] performance cores: %s (top %.2f GHz)\n",list[0]?list:"none",top/1e6);
         return set;
     }();
+    // MAGATAMA_PRIME_THREADS (comma-separated thread names, default none): those threads run only on the fastest
+    // cores (the Snapdragon 8 Gen 2's single 3.2 GHz core), and with MAGATAMA_PRIME_EXCLUSIVE=1 every other thread
+    // here keeps off them. In heavy scenes the game thread and rrv-vu1 take turns each frame, so the slower of the
+    // two on a 2.8 GHz core sets the frame rate.
+    static const cpu_set_t prime=[] {
+        cpu_set_t set;CPU_ZERO(&set);long freq[CPU_SETSIZE]{};long top=0;
+        const long count=sysconf(_SC_NPROCESSORS_CONF);
+        for(long cpu=0;cpu<count&&cpu<CPU_SETSIZE;++cpu) {
+            char path[96];std::snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu%ld/cpufreq/cpuinfo_max_freq",cpu);
+            if(FILE* f=std::fopen(path,"r")) {if(std::fscanf(f,"%ld",&freq[cpu])!=1)freq[cpu]=0;std::fclose(f);}
+            if(freq[cpu]>top)top=freq[cpu];
+        }
+        for(long cpu=0;cpu<count&&cpu<CPU_SETSIZE;++cpu)if(top>0&&freq[cpu]==top)CPU_SET(cpu,&set);
+        return set;
+    }();
     char name[64]{};pthread_getname_np(pthread_self(),name,sizeof(name));
-    const int affinity=CPU_COUNT(&perf)?sched_setaffinity(0,sizeof perf,&perf):-1;
+    cpu_set_t chosen=perf;
+    {
+        const char* list=std::getenv("MAGATAMA_PRIME_THREADS");
+        bool listed=false;
+        if(list&&*list) {
+            const std::string all=std::string(",")+list+",";
+            listed=all.find(std::string(",")+name+",")!=std::string::npos;
+        }
+        const char* exclusive=std::getenv("MAGATAMA_PRIME_EXCLUSIVE");
+        if(listed&&CPU_COUNT(&prime))chosen=prime;
+        else if(list&&*list&&exclusive&&exclusive[0]=='1'&&CPU_COUNT(&perf)>CPU_COUNT(&prime)+1) {
+            for(int cpu=0;cpu<CPU_SETSIZE;++cpu)if(CPU_ISSET(cpu,&prime))CPU_CLR(cpu,&chosen);
+        }
+        if(listed)std::fprintf(stderr,"[perf-cores] thread=%s on the fastest cores only\n",name);
+    }
+    const int affinity=CPU_COUNT(&chosen)?sched_setaffinity(0,sizeof chosen,&chosen):-1;
     const int priority=setpriority(PRIO_PROCESS,0,-10);
     std::fprintf(stderr,"[perf-cores] thread=%s affinity=%s nice-10=%s\n",name,affinity==0?"ok":"failed",
                  priority==0?"ok":"failed");

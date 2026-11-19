@@ -197,8 +197,11 @@ void loadEnvFile(const fs::path &file)
                        "# Extra software-render helper threads in the graphics library (default 3):\n"
                        "#RRV_PCSX2_GS_SW_THREADS=1\n"
                        "#\n"
-                       "# VU1 and graphics on two separate threads instead of one (default off):\n"
-                       "#RRV_VU1GS_SPLIT=1\n"
+                       "# VU1 and graphics on one thread instead of two (slower; default off):\n"
+                       "#RRV_VU1GS_SPLIT=0\n"
+                       "#\n"
+                       "# Let the game build the next frame while the last one is still drawing (experimental; default off):\n"
+                       "#MAGATAMA_FINISH_RUNAHEAD=1\n"
                        "#\n"
                        "# Hide the FPS / frame-time overlay:\n"
                        "#RRV_PCSX2_GS_PERF_OSD=0\n",

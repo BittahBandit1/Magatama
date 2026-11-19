@@ -1644,6 +1644,33 @@ bool Backend::readLocalMemory(uint8_t *outBytes, uint32_t byteCount,
     return true;
 }
 
+bool Backend::readLocalMemoryAsync(uint32_t byteCount, uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg,
+                                   std::function<void(bool ok, std::vector<uint8_t> &&bytes)> done)
+{
+    if (!m_active || byteCount == 0u || !m_worker)
+        return false;
+    // No m_mutex: a producer may hold it while it waits for this very thread.
+    auto read = [this, byteCount, bitbltbuf, trxpos, trxreg, done = std::move(done)] {
+        std::vector<uint8_t> bytes(byteCount);
+        std::array<char, kErrorCapacity> detail{};
+        const bool ok = m_readLocalMemory(m_bridge, bytes.data(), byteCount, bitbltbuf, trxpos, trxreg,
+                                          detail.data(), static_cast<uint32_t>(detail.size())) != 0;
+        done(ok, std::move(bytes));
+    };
+    if (m_worker->ownsThisThread())
+    {
+        read();
+        return true;
+    }
+    if (readbackDeferred()) // rrv-vu1: behind the packets it has batched so far
+    {
+        flushSplitBatch();
+        m_worker->submit(std::move(read), byteCount);
+        return true;
+    }
+    return false;
+}
+
 bool Backend::snapshotLocalMemory(std::vector<uint8_t> &outBytes, std::string *error)
 {
     std::lock_guard<std::mutex> lock(m_mutex);

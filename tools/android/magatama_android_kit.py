@@ -18,7 +18,7 @@ The script fails if anything from generated/ would end up in the kit.
 """
 from __future__ import annotations
 
-import argparse, json, re, shlex, shutil, subprocess, sys, tempfile
+import argparse, hashlib, json, re, shlex, shutil, subprocess, sys, tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +64,10 @@ def main() -> int:
     def clean(tok: str) -> str | None:
         """A build-machine argument as the phone needs it (None: leave it out)."""
         if tok == "-g" or tok.startswith("-flto"):
+            return None
+        # The build number changes with every APK; the game code never reads it, and keeping it in the compile
+        # templates made every app update recompile the whole game on the phone (~30 min) instead of relinking.
+        if tok.startswith("-DMAGATAMA_ANDROID_BUILD="):
             return None
         if tok.endswith("/clang++") or tok.endswith("/clang"):
             return "@CXX@"
@@ -159,12 +163,18 @@ def main() -> int:
                 p = Path(h) if h.startswith("/") else (build / h)
                 headers.add(str(p))
     copied = 0
+    digest = hashlib.sha256()
     for h in sorted(headers):
         if h.startswith(sysroot) or h.startswith(str(prebuilt)) or "/generated/" in h or h.startswith(tempfile.gettempdir()):
             continue
         if kit(h) and Path(h).is_file():
             place(Path(h)); copied += 1
-    print(f"headers: {copied}")
+            digest.update(kit(h).encode() + b"\0" + Path(h).read_bytes())
+    # The phone reuses its compiled game objects while the recipe stays the same (GameBuilder's objectsKey). The
+    # game is compiled against these headers (PS2Runtime's layout among them), so a header change must change the
+    # recipe too, or an app update links old objects against a runtime whose classes moved.
+    recipe["unity"]["headers_sha256"] = digest.hexdigest()
+    print(f"headers: {copied} sha256={digest.hexdigest()[:12]}")
 
     # ---- the recompiler's configuration
     (out / "config").mkdir()

@@ -459,7 +459,7 @@ void PS2Runtime::gate3PublishCsrV1() {
     auto& gs=m_memory.gs();
     // Owner-async: the interrupt check reads bridge-owned bits only if IMR
     // unmasks one (design §4.2 item 2); otherwise it needs no owner result.
-    if(m_vu1gsModeV1==Vu1GsModeV1::OwnerAsync && (~(gs.imr>>8)&0x17u)!=0u)gate4FenceV1();
+    if(m_vu1gsModeV1==Vu1GsModeV1::OwnerAsync && (~(gs.imr>>8)&0x17u)!=0u){EeFenceReason reason(5);gate4FenceV1();}
     rrv::gate4::ownerCsrPublish(gs.imr);
     rrv::guest_time::QuietBumpProducer();
     gs.csr=(gs.csr&~uint64_t(0x2008))|gate3TemporalV1().csr();
@@ -943,7 +943,7 @@ bool PS2Runtime::gate3MmioReadV1(uint32_t address,unsigned width,uint64_t& value
     if(gate3PlainMmioQuietV1(address&0x1fffffffU))return false;
     gate3HardwareV1();
     const auto physical=address&0x1fffffffU;
-    if(physical>=0x12001080u && physical<0x12001088u){rrv::gate4::ownerBarrier(rrv::gate4::BarrierKind::SiglblidRead);gate4FenceV1();}
+    if(physical>=0x12001080u && physical<0x12001088u){rrv::gate4::ownerBarrier(rrv::gate4::BarrierKind::SiglblidRead);EeFenceReason reason(6);gate4FenceV1();}
     if(physical>=0x12001000u && physical<0x12001008u){
         // MAGATAMA_CSR_PROFILE=1: which guest PCs poll CSR, and how often (printed every 600 starts).
         static const bool csrProfile=[]{const char* v=std::getenv("MAGATAMA_CSR_PROFILE");return v&&v[0]=='1';}();
@@ -956,7 +956,53 @@ bool PS2Runtime::gate3MmioReadV1(uint32_t address,unsigned width,uint64_t& value
                 for(auto& [pc,n]:byPc)std::fprintf(stderr," %x=%llu",pc,(unsigned long long)n);std::fprintf(stderr,"\n");byPc.clear();}
         }
         rrv::gate4::ownerBarrier(rrv::gate4::BarrierKind::CsrRead);
-        gate4FenceV1();
+        // MAGATAMA_FAST_CSR_READ (default on, owner-async): a CSR read waits for the VU1/GS owner to drain only
+        // when the answer can depend on it. Nocturne reads CSR twice a frame (b47 on the Nova: 150 fences/s,
+        // 350 ms/s of the EE waiting): its vsync handler (0x2aa170) for FIELD only, which the EE itself keeps,
+        // and its draw thread after it wakes (0x2add14) for FINISH. FINISH already set in the EE's published
+        // copy is what a fence answers too: the bit is sticky until the guest acknowledges it, and the copy is
+        // only ever published right after a drain. The owner's unpublished readback is not trusted here: after
+        // an asynchronous acknowledge it can still show the FINISH from before it. Only "not set yet" drains.
+        // FIELD-only readers: MAGATAMA_CSR_FIELD_READERS (comma-separated hex PCs).
+        bool fenced=true;
+        static const bool fastCsr=[]{const char* v=std::getenv("MAGATAMA_FAST_CSR_READ");return !(v&&v[0]=='0');}();
+        if(fastCsr && m_vu1gsModeV1==Vu1GsModeV1::OwnerAsync){
+            static const std::vector<uint32_t> fieldReaders=[]{
+                std::vector<uint32_t> pcs;const char* v=std::getenv("MAGATAMA_CSR_FIELD_READERS");
+                std::string list=v?v:"2aa170";
+                for(size_t at=0;at<list.size();){size_t end=list.find(',',at);if(end==std::string::npos)end=list.size();
+                    if(end>at)pcs.push_back(uint32_t(std::strtoul(list.substr(at,end-at).c_str(),nullptr,16)));at=end+1;}
+                return pcs;}();
+            const auto found=gate3WaitContexts.find(this);
+            const uint32_t pc=found==gate3WaitContexts.end()?0u:found->second->pc;
+            const bool fieldOnly=std::find(fieldReaders.begin(),fieldReaders.end(),pc)!=fieldReaders.end();
+            if(fieldOnly || (m_memory.gs().csr&2u))fenced=false;
+            // MAGATAMA_FINISH_RUNAHEAD (default off; experimental, NOT for players: on the Nova it flickered while moving
+            // and aborted within two minutes with "Gate3 release by non-owner" when a guest thread exited): the draw thread's FINISH check after it wakes
+            // waits only for the PREVIOUS frame's VU1/GS work (everything posted before its last such check), then
+            // reports FINISH. The EE builds frame N+1 while VU1/GS still draw frame N, instead of the two taking
+            // turns: on the Nova in the save-3 area each does ~8-10 ms a field and together they miss the 16.7 ms.
+            // The guest sees "drawing finished" one frame early; everything it reads back from VU1/GS still waits
+            // (local reads, SIGLBLID, GS register writes and the VIF1/VU1 hooks drain fully as before).
+            static const bool runahead=[]{const char* v=std::getenv("MAGATAMA_FINISH_RUNAHEAD");return v&&v[0]=='1';}();
+            if(fenced && runahead && pc==0x2add14u){
+                const uint64_t previous=g_runaheadSeqV1;
+                g_runaheadSeqV1=g_lastOwnerSeqV1;
+                const auto t0=std::chrono::steady_clock::now();
+                if(previous)m_gsBackend.ownerWait(previous);
+                EeFenceReason reason(7);
+                eeFenceNote(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now()-t0).count()),0,0);
+                rrv::guest_time::QuietBump();m_memory.gs().csr|=2u;
+                fenced=false;
+            }
+            static uint64_t fast=0,slow=0;
+            ++(fenced?slow:fast);
+            static const bool logFast=[]{const char* v=std::getenv("MAGATAMA_FENCE_LOG");return !(v&&v[0]=='0');}();
+            if(logFast && (fast+slow)%1200==0)
+                std::fprintf(stderr,"[fast-csr] skipped=%llu fenced=%llu\n",(unsigned long long)fast,(unsigned long long)slow);
+        }
+        if(fenced){EeFenceReason reason(4);gate4FenceV1();}
         gate3PublishCsrV1();value=m_memory.gs().csr>>((physical-0x12001000u)*8);
         if(width<8)value&=(uint64_t(1)<<(width*8))-1;
         {   // A guest spinning on CSR without FINISH: report the producer state once per spin (always on, cheap).
@@ -1038,9 +1084,17 @@ bool PS2Runtime::gate3MmioWriteV1(uint32_t address,unsigned width,uint64_t value
             (unsigned long long)gate3TemporalV1().now(),rrv::guest_time::context_id,found==gate3WaitContexts.end()?0u:found->second->pc);};
     if(physical>=0x12001080u && physical<0x12001088u)gate4GuestGsWriteV1(physical);
     if(physical>=0x12001000u && physical<0x12001008u){
-        gate4GuestGsWriteV1(physical);
-        logWrite();
         const uint64_t bits=value<<((physical-0x12001000u)*8);
+        // MAGATAMA_ASYNC_CSR_ACK (default on): a CSR write that only acknowledges FINISH/HSINT/VSINT/EDWINT (or
+        // writes nothing at all) changes only the EE's copy of CSR, so it need not wait for the VU1/GS owner to
+        // drain first. Nocturne's draw thread acknowledges FINISH (and writes 0) once a frame before it sleeps
+        // for the next one; the fence made the EE wait for every packet queued so far (4 ms a frame on a phone),
+        // so the EE could never get ahead of VU1/GS. The owner's next readback is published at the next fence
+        // either way. SIGNAL acknowledges and RESET still fence.
+        static const bool asyncAck=[]{const char* v=std::getenv("MAGATAMA_ASYNC_CSR_ACK");return !(v&&v[0]=='0');}();
+        if(!(asyncAck && m_vu1gsModeV1==Vu1GsModeV1::OwnerAsync && (bits&~uint64_t(0x1e))==0))
+            gate4GuestGsWriteV1(physical);
+        logWrite();
         static const bool traceGsWrites = [] {
             const char* v=std::getenv("MAGATAMA_TRACE_GRAPHICS");
             return v && v[0]=='1';

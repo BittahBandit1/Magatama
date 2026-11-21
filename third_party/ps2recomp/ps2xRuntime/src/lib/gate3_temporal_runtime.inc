@@ -1,3 +1,5 @@
+// MAGATAMA_CSR_PARK: guest threads parked on host (VU1/GS) work, resolved by rrv-gs-owner.
+static std::atomic<int> g_gate3HostWaitsV1{0};
 #include <chrono>
 #include <sstream>
 #include <thread>
@@ -799,6 +801,12 @@ void PS2Runtime::gate3IdleV1(){
     if(!m_gate3TemporalV1)return;
     bool stalled=false; uint64_t stallCycles=0,stallNow=0; int stallCallback=0;
     while(!gate3Scheduler.hasRunnable()){
+        // A thread parked on host work (MAGATAMA_CSR_PARK) becomes runnable when rrv-gs-owner finishes it. Guest
+        // time does not move meanwhile, the same as the blocking fence it replaces: wait on the host instead.
+        if(g_gate3HostWaitsV1.load(std::memory_order_acquire)){
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            continue;
+        }
         gate3HostPauseV1(kPauseWait);
         // A callback can park while another callback from this hardware batch
         // is already staged. Service that batch before moving the clock.
@@ -1001,6 +1009,48 @@ bool PS2Runtime::gate3MmioReadV1(uint32_t address,unsigned width,uint64_t& value
             static const bool logFast=[]{const char* v=std::getenv("MAGATAMA_FENCE_LOG");return !(v&&v[0]=='0');}();
             if(logFast && (fast+slow)%1200==0)
                 std::fprintf(stderr,"[fast-csr] skipped=%llu fenced=%llu\n",(unsigned long long)fast,(unsigned long long)slow);
+        }
+        // MAGATAMA_CSR_PARK (experimental): a FINISH check that has to wait for VU1/GS sleeps through the guest
+        // scheduler instead of blocking inside the read. The fence below otherwise holds guest execution while it
+        // waits, so the game's other threads (its main thread building the next frame) stop too and the EE and VU1
+        // take turns every frame. Parked, the thread is blocked like a semaphore wait; rrv-gs-owner wakes it once
+        // everything posted before the read is drawn, then the fence below is short and publishes the real CSR.
+        // Guest-visible values stay exact (no early FINISH); only which guest thread runs meanwhile changes, so
+        // replays are not bit-exact with it on. Draw-thread PCs: MAGATAMA_CSR_PARK_PCS (hex, default 2add14).
+        if(fenced && m_vu1gsModeV1==Vu1GsModeV1::OwnerAsync && rrv::guest_time::context_id>0){
+            static const bool park=[]{const char* v=std::getenv("MAGATAMA_CSR_PARK");return v&&v[0]=='1';}();
+            static const std::vector<uint32_t> parkPcs=[]{
+                std::vector<uint32_t> pcs;const char* v=std::getenv("MAGATAMA_CSR_PARK_PCS");
+                std::string list=v?v:"2add14";
+                for(size_t at=0;at<list.size();){size_t end=list.find(',',at);if(end==std::string::npos)end=list.size();
+                    if(end>at)pcs.push_back(uint32_t(std::strtoul(list.substr(at,end-at).c_str(),nullptr,16)));at=end+1;}
+                return pcs;}();
+            const auto found=gate3WaitContexts.find(this);
+            const uint32_t pc=found==gate3WaitContexts.end()?0u:found->second->pc;
+            if(park && std::find(parkPcs.begin(),parkPcs.end(),pc)!=parkPcs.end()){
+                const int id=rrv::guest_time::context_id;
+                const auto t0=std::chrono::steady_clock::now();
+                auto ticket=gate3Scheduler.wait(id);
+                g_gate3HostWaitsV1.fetch_add(1,std::memory_order_acq_rel);
+                m_gsBackend.ownerNotify([this,ticket]{
+                    gate3Scheduler.resolve(ticket,0);
+                    g_gate3HostWaitsV1.fetch_sub(1,std::memory_order_acq_rel);
+                });
+                {
+                    gate3IdleV1();
+                    GuestExecutionReleaseScope release(this);
+                    gate3Scheduler.park(ticket);
+                }
+                {
+                    static uint64_t parks=0; static double parkedMs=0;
+                    parkedMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count();
+                    if(++parks%600==0){
+                        std::fprintf(stderr,"[csr-park] parks=%llu avg %.2f ms parked\n",(unsigned long long)parks,parkedMs/600);
+                        parkedMs=0;
+                    }
+                }
+                if(gate3Scheduler.terminated(id))throw rrv::guest_time::ThreadExit();
+            }
         }
         if(fenced){EeFenceReason reason(4);gate4FenceV1();}
         gate3PublishCsrV1();value=m_memory.gs().csr>>((physical-0x12001000u)*8);

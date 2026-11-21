@@ -6,8 +6,9 @@ repo=Path(__file__).resolve().parents[1]
 source=repo/'build/live-settings-bridge-source'
 canonical_build=repo/'build/live-settings-bridge'
 build=canonical_build
-fukami=Path(os.environ.get('FUKAMI_DIR',str(Path.home()/'fukami')))
-metal=fukami/'build/fukami/metal'
+# Everything the bridge needs lives in this checkout (build-deps/ is gitignored, never in another checkout).
+pcsx2_source=Path(os.environ.get('MAGATAMA_PCSX2_SOURCE_DIR',str(repo/'build-deps/pcsx2-2.8.2')))
+metal=repo/'build-deps/pcsx2-metal'
 lock=tomllib.loads((source/'config/dependencies.lock.toml').read_text())
 # A different locked patch cannot reuse a CMake cache configured against the
 # old retained source. Keep that build intact and use a patch-scoped build.
@@ -35,7 +36,7 @@ if (metal_identity.get('bridge_patch',{}).get('sha256') != patch_hash or
     metal=canonical_build.resolve().parent/f'metal-resources-{patch_hash[:12]}'
     if not (metal/'metal-resources-manifest.json').exists():
         shader_command=[sys.executable,str(repo/'scripts/build_pcsx2_metal_resources.py'),
-            '--source',str(fukami/'build-deps/pcsx2-2.8.2'),'--output',str(metal)]
+            '--source',str(pcsx2_source),'--output',str(metal)]
         discovery=subprocess.run(['xcrun','metal','-v'],text=True,
             stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
         if discovery.returncode and 'missing Metal Toolchain' in discovery.stdout:
@@ -50,7 +51,7 @@ if (metal_identity.get('bridge_patch',{}).get('sha256') != patch_hash or
         subprocess.run(shader_command,check=True)
 env=dict(os.environ,CMAKE_BUILD_PARALLEL_LEVEL=sys.argv[1] if len(sys.argv)>1 else '8')
 if not (build/'CMakeCache.txt').exists():
-    env.update(PCSX2_SOURCE_DIR=str(fukami/'build-deps/pcsx2-2.8.2'),
+    env.update(PCSX2_SOURCE_DIR=str(pcsx2_source),
         PCSX2_GS_BRIDGE_BUILD_DIR=str(build),PCSX2_METAL_RESOURCE_DIR=str(metal),
         PCSX2_METAL_RESOURCE_MANIFEST=str(metal/'metal-resources-manifest.toml'))
     subprocess.run([str(source/'scripts/build_pcsx2_gs_bridge.sh'),

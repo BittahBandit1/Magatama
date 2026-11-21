@@ -1562,6 +1562,25 @@ void Backend::ownerFence()
         m_worker->fence();
 }
 
+void Backend::ownerNotify(std::function<void()> done)
+{
+    if (!m_worker)
+    {
+        done();
+        return;
+    }
+    if (m_vuWorker)
+    {
+        // Behind the VU1 work queued so far, then behind the GS packets that work produced.
+        m_vuWorker->submit([this, done = std::move(done)]() mutable {
+            flushSplitBatch();
+            m_worker->submit(std::move(done), 0);
+        }, 0, 0);
+        return;
+    }
+    m_worker->submit(std::move(done), 0);
+}
+
 bool Backend::startVuSplit(ReadbackSink sink, std::string *error)
 {
     if (!m_worker)

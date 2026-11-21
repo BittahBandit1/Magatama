@@ -20,7 +20,7 @@ if not args.build_generator:
     if hashlib.sha256(data).hexdigest()!=expected:raise SystemExit('USA ELF identity mismatch')
 # The recompiler build whose fmt/rabbitizer this tool links: scripts/magatama_generate.py's, else a Fukami checkout's.
 cache=Path(os.environ['MAGATAMA_RECOMPILER_BUILD']) if os.environ.get('MAGATAMA_RECOMPILER_BUILD') else root/'build/magatama-generate/recompiler'
-if not cache.is_dir():cache=Path(os.environ.get('FUKAMI_DIR',str(Path.home()/'fukami')))/'build/fukami-generate/recompiler'
+if not cache.is_dir() and os.environ.get('FUKAMI_DIR'):cache=Path(os.environ['FUKAMI_DIR'])/'build/fukami-generate/recompiler'
 deps=cache/'_deps';build=root/'build/nocturne-effects';build.mkdir(parents=True,exist_ok=True)
 source=root/'third_party/ps2recomp';gen=Path(args.build_generator) if args.build_generator else build/'generate'
 cmd=['c++','-std=c++20','-O2',*['-I'+str(p) for p in [source/'ps2xRecomp/include',source/'ps2xRuntime/include',deps/'fmt-src/include',deps/'rabbitizer-src/include',deps/'rabbitizer-src/tables']],str(root/'tools/nocturne-effects/generate.cpp'),str(source/'ps2xRecomp/src/lib/code_generator.cpp'),str(source/'ps2xRecomp/src/lib/r5900_decoder.cpp'),str(deps/'fmt-build/libfmt.a'),str(cache/'ps2recomp/ps2xRecomp/librabbitizer.a'),'-o',str(gen)]

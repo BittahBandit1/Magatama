@@ -73,7 +73,16 @@ final class GameBuilder {
     }
 
     static File gameLibrary(Context c) {
-        return new File(gameDir(c), "libmain.so");
+        final File bundled = bundledGame(c);
+        return bundled != null ? bundled : new File(gameDir(c), "libmain.so");
+    }
+
+    /** Test builds only (MAGATAMA_ANDROID_PREBUILT_GAME=1 in scripts/magatama_build_android.sh): the game compiled on
+     *  the build machine and shipped in the APK's lib/ folder, so a test device skips the on-device build. Published
+     *  APKs never carry it (the build script's gate refuses one). */
+    static File bundledGame(Context c) {
+        final File f = new File(c.getApplicationInfo().nativeLibraryDir, "libmain.so");
+        return f.isFile() ? f : null;
     }
 
     private static File stampFile(Context c) {
@@ -91,6 +100,8 @@ final class GameBuilder {
 
     /** True when files/game/libmain.so was built by this version of the app (an update needs a new link). */
     static boolean built(Context c) {
+        if (bundledGame(c) != null)
+            return true;
         try {
             return gameLibrary(c).isFile() &&
                 new String(Files.readAllBytes(stampFile(c).toPath()), StandardCharsets.UTF_8).trim()
@@ -258,7 +269,7 @@ final class GameBuilder {
                       "$ORIGIN".getBytes(StandardCharsets.UTF_8));
         final File game = gameDir(context);
         game.mkdirs();
-        final File library = gameLibrary(context);
+        final File library = new File(gameDir(context), "libmain.so");
         if (!staging.renameTo(library)) {
             copy(staging, library);
             staging.delete();

@@ -872,7 +872,15 @@ bool PS2Runtime::readActiveGsBackendLocalMemory(uint8_t *dst, uint32_t byteCount
         {
             std::memcpy(dst, cache.bytes.data(), byteCount);
             ++cache.served;
-            if (!cache.pending)
+            // MAGATAMA_STALE_REFRESH_EVERY=N (default 1): refresh the cached copy only on every Nth read. Each refresh
+            // makes the GS thread wait for the GPU to finish the frame (Moto edge 2024, Adreno 710, 2.4x: 17 ms a
+            // field, more than the whole field). The copy stays within 100 ms of the screen either way.
+            static const uint64_t every = [] {
+                const char *v = std::getenv("MAGATAMA_STALE_REFRESH_EVERY");
+                const long n = v ? std::strtol(v, nullptr, 10) : 1;
+                return uint64_t(n >= 1 && n <= 6 ? n : 1);
+            }();
+            if (!cache.pending && cache.served % every == 0)
             {
                 cache.pending = true;
                 lock.unlock();

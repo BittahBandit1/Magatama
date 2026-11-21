@@ -56,13 +56,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--fukami", type=Path, default=Path(os.environ.get("FUKAMI_DIR", Path.home() / "fukami")))
+    ap.add_argument("--fukami", type=Path, default=Path(os.environ["FUKAMI_DIR"]) if os.environ.get("FUKAMI_DIR") else None)
     args = ap.parse_args()
     build, out = args.build.resolve(), args.out.resolve()
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
-    pm = PathMap(build, args.fukami if args.fukami.exists() else None)
+    pm = PathMap(build, args.fukami if args.fukami and args.fukami.exists() else None)
     ninja = shutil.which("ninja") or "/opt/homebrew/bin/ninja"
 
     def place(src: Path) -> str:

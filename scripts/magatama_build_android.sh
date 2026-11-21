@@ -7,7 +7,9 @@
 #   build/android/Magatama-android-b<N>.apk     (debug-signed; N from ~/magatama/android-build-number, or
 #                                                 MAGATAMA_ANDROID_BUILD_NO)
 # The APK holds no game code: the app builds the game on the phone from the user's own disc (GameBuilder.java), with
-# the compiler it carries. Layout inside the APK:
+# the compiler it carries. Test builds only: MAGATAMA_ANDROID_PREBUILT_GAME=1 also compiles the game from
+# generated/nocturne and ships it as lib/<abi>/libmain.so (Magatama-android-b<N>-TEST-with-game-code.apk), so a test
+# device skips the on-device build. Layout inside the APK:
 #   lib/arm64-v8a/  libSDL3.so libSDL2.so (sdl2-compat) librrv-pcsx2-gs-bridge.so libc++_shared.so libmagatama_import.so
 #                   (launcher); the build tools: libmg_recomp.so (ps2_recomp) libmg_vuaot.so (tools/vu-aot/vu_aot_gen.cpp)
 #                   libmg_effects.so (tools/nocturne-effects); the compiler: libmg_clang.so libmg_lld.so and their
@@ -111,6 +113,13 @@ if run_from product; then
               grep -v -e librrv_legacy_game_funcs.a -e nocturne_bezier -e '^/' | sort -u)
     ninja -C "$product" -j "$JOBS" $targets > "$out/product-build.log" 2>&1 ||
         { grep -E "error:|undefined (reference|symbol)" "$out/product-build.log" | sed "s#$repo/##" | sort -u | head -80; exit 1; }
+    # MAGATAMA_ANDROID_PREBUILT_GAME=1 (TEST BUILDS ONLY, never published): also compile the game itself here, from
+    # generated/nocturne (scripts/magatama_generate.py on your own disc), so a test device skips the on-device build.
+    if [[ "${MAGATAMA_ANDROID_PREBUILT_GAME:-0}" == 1 ]]; then
+        log "TEST BUILD: compiling the game into libmain.so (the APK will carry game code)"
+        ninja -C "$product" -j "$JOBS" candidate-bin/libmain.so > "$out/product-game-build.log" 2>&1 ||
+            { grep -E "error:|undefined (reference|symbol)" "$out/product-game-build.log" | sed "s#$repo/##" | sort -u | head -80; exit 1; }
+    fi
 fi
 
 # --------------------------------------------------------------- 5. build tools for the phone (as executables)
@@ -172,6 +181,11 @@ if run_from apk; then
     # Symbols stay in the build tree (crash logs give library + offset); the APK carries stripped copies.
     strip="$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip | head -1)"
     for so in "$apkdir/lib/$ABI/"*.so; do "$strip" --strip-unneeded "$so"; done
+    prebuilt="${MAGATAMA_ANDROID_PREBUILT_GAME:-0}"
+    if [[ $prebuilt == 1 ]]; then # TEST BUILDS ONLY: the game, compiled above (GameBuilder.bundledGame loads it)
+        [[ -f "$product/candidate-bin/libmain.so" ]] || { echo "!! no $product/candidate-bin/libmain.so" >&2; exit 1; }
+        "$strip" --strip-unneeded -o "$apkdir/lib/$ABI/libmain.so" "$product/candidate-bin/libmain.so"
+    fi
     # The build tools and the compiler (already stripped), and what they build with.
     cp "$tools"/libmg_*.so "$toolchain"/lib/*.so "$apkdir/lib/$ABI/"
     mkdir -p "$apkdir/assets/build"
@@ -205,9 +219,14 @@ if run_from apk; then
     [[ -f "$keystore" ]] || keytool -genkeypair -keystore "$keystore" -storepass android -keypass android \
         -alias magatama -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Magatama debug" -noprompt >/dev/null
     apk="$out/Magatama-android-b$build_no.apk"
+    [[ $prebuilt == 1 ]] && apk="$out/Magatama-android-b$build_no-TEST-with-game-code.apk"
     java -jar "$bt/lib/apksigner.jar" sign --ks "$keystore" --ks-pass pass:android --key-pass pass:android \
         --ks-key-alias magatama --out "$apk" "$apkdir/aligned.apk"
     ls -l "$apk"
+    if [[ $prebuilt == 1 ]]; then
+        log "done: $apk -- TEST BUILD WITH GAME CODE: for your own devices only, never publish it"
+        exit 0
+    fi
     # The gate: no game code in the APK (no libmain.so, no translated functions, nothing generated).
     gate="$out/apk-gate"; rm -rf "$gate"; mkdir -p "$gate"; (cd "$gate" && unzip -q "$apk")
     [[ ! -e "$gate/lib/$ABI/libmain.so" ]] || { echo "!! the APK has libmain.so" >&2; exit 1; }

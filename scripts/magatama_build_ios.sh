@@ -174,7 +174,7 @@ cmake -S "$repo" -B "$product" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTE
     -DMAGATAMA_GAME=ON -DMAGATAMA_IOS_DEPS="$deps" \
     -DMAGATAMA_IOS_LAUNCHER_OBJECT="$launcher_obj" -DMAGATAMA_IOS_SWIFT_LINK="$swift_link" \
     -DRRV_PCSX2_GS_BRIDGE_MANIFEST="$live_manifest" \
-    -DRRV_PCSX2_SOURCE_DIR="$HOME/fukami/build-deps/pcsx2-2.8.2" \
+    -DRRV_PCSX2_SOURCE_DIR="${MAGATAMA_PCSX2_SOURCE_DIR:-$repo/build-deps/pcsx2-2.8.2}" \
     -DFETCHCONTENT_SOURCE_DIR_SSE2NEON="$repo/build-deps/sse2neon-92f6de1" \
     -DRRV_DISC_ZSTD_STATIC="$deps/lib/libzstd.a" -DRRV_DISC_ZSTD_INCLUDE_DIR="$deps/include" \
     > "$out/product-configure.log" 2>&1

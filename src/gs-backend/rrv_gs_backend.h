@@ -281,6 +281,9 @@ namespace rrv::gsbackend
         uint64_t ownerPost(std::function<void()> command, size_t bytes, size_t fields);
         void ownerWait(uint64_t sequence);
         void ownerFence();
+        // Runs done() on rrv-gs-owner once everything posted to the owner stream before this call (VU1 work and the
+        // GS packets it produced) has been processed. Posts and returns at once; done() must not take m_mutex.
+        void ownerNotify(std::function<void()> done);
 
         // Gate-5 VU1/GS split (RRV_VU1GS_SPLIT=1, owner-async only). Owner
         // commands (VIF1, VU1, the GIF arbiter) move to a second thread,

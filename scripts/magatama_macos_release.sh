@@ -13,7 +13,6 @@ set -eu
 repo="${0:A:h:h}"
 version="${1:-$(cat "$repo/VERSION")}"
 jobs="${MAGATAMA_JOBS:-8}"
-fukami="${FUKAMI_DIR:-$HOME/fukami}"
 out="$repo/build/macos-release"
 build="$out/product"
 target=14.0     # the oldest macOS the release runs on (checked against every bundled library below)
@@ -83,7 +82,7 @@ if [[ ! -f "$bridge_manifest" ]]; then
     metal="$(cd "$repo/build/live-settings-bridge" && pwd -P)/../metal-resources-${locked_patch:0:12}"
     [[ -f "$metal/metal-resources-manifest.toml" ]] || { print -u2 "no Metal libraries for this patch: $metal"; exit 1; }
     rm -rf "$bridge" "$bridge"-source-*(N)
-    PCSX2_SOURCE_DIR="${MAGATAMA_PCSX2_SOURCE_DIR:-$fukami/build-deps/pcsx2-2.8.2}" PCSX2_GS_BRIDGE_BUILD_DIR="$bridge" \
+    PCSX2_SOURCE_DIR="${MAGATAMA_PCSX2_SOURCE_DIR:-$repo/build-deps/pcsx2-2.8.2}" PCSX2_GS_BRIDGE_BUILD_DIR="$bridge" \
     PCSX2_METAL_RESOURCE_DIR="$metal" PCSX2_METAL_RESOURCE_MANIFEST="$metal/metal-resources-manifest.toml" \
     FUKAMI_MACOS_TARGET=$target CMAKE_BUILD_PARALLEL_LEVEL=$jobs \
     "$MAGATAMA_BRIDGE_ROOT/scripts/build_pcsx2_gs_bridge.sh" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_QT_UI=OFF \
@@ -102,14 +101,14 @@ cmake -S "$repo" -B "$build" -G Ninja \
     -DRRV_PCSX2_GS_BRIDGE_MANIFEST="$bridge_manifest" -DMAGATAMA_MACOS_SDL_PREFIX="$sdl2" \
     -DRRV_PCSX2_GS_BRIDGE_MANIFEST_VERIFIER="$MAGATAMA_BRIDGE_ROOT/scripts/pcsx2_bridge_manifest.py" \
     -DRRV_DISC_ZSTD_STATIC="$deps/lib/libzstd.a" -DRRV_DISC_ZSTD_INCLUDE_DIR="$deps/include" \
-    -DRRV_PCSX2_SOURCE_DIR="${MAGATAMA_PCSX2_SOURCE_DIR:-$fukami/build-deps/pcsx2-2.8.2}" \
+    -DRRV_PCSX2_SOURCE_DIR="${MAGATAMA_PCSX2_SOURCE_DIR:-$repo/build-deps/pcsx2-2.8.2}" \
     -DFETCHCONTENT_SOURCE_DIR_SSE2NEON="$repo/build-deps/sse2neon-92f6de1" > "$out/product-configure.log"
 cmake --build "$build" --target Fukami --parallel "$jobs" > "$out/product-build.log" 2>&1 ||
     { tail -20 "$out/product-build.log"; exit 1; }
 
 print "== kit"
 kit="$out/kit"
-python3 "$repo/scripts/magatama_macos_kit.py" --build "$build" --out "$kit" --fukami "$fukami"
+python3 "$repo/scripts/magatama_macos_kit.py" --build "$build" --out "$kit"
 mkdir -p "$kit/tools/vu-aot" "$kit/config" "$kit/app"
 cp "$repo/tools/vu-aot/vu_aot_gen.py" "$kit/tools/vu-aot/"
 cp "$repo/config/magatama/nocturne-recomp.toml.in" "$repo/config/magatama/nocturne-functions.csv" "$kit/config/"
@@ -122,7 +121,7 @@ cmake --build "$out/recompiler" --target ps2_recomp --parallel "$jobs" > "$out/r
 cp "$(find "$out/recompiler" -name ps2_recomp -type f -perm -u+x | head -1)" "$kit/tools/ps2_recomp"
 MAGATAMA_RECOMPILER_BUILD="$out/recompiler" python3 "$repo/scripts/magatama_generate_bezier.py" \
     --build-generator "$kit/tools/nocturne-effects-generate" --target $target
-pcsx2="${MAGATAMA_PCSX2_SOURCE_DIR:-$fukami/build-deps/pcsx2-2.8.2}"
+pcsx2="${MAGATAMA_PCSX2_SOURCE_DIR:-$repo/build-deps/pcsx2-2.8.2}"
 zstd="$deps/lib/libzstd.a"
 xcrun clang++ -std=c++20 -O2 -mmacosx-version-min=$target -I"$repo/src/app" -I"$pcsx2/3rdparty/libchdr/include" \
     "$repo/src/app/magatama_disc_import.cpp" "$repo/src/app/magatama_disc_import_tool.cpp" \

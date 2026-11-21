@@ -27,12 +27,16 @@
 #if defined(MAGATAMA_SOUND_DRIVER)
 #include "../audio/nocturne_sound.h"
 #include "../audio/nocturne_native_sound.h"
+#include "../host/rrv_sdl_audio.h"
 #endif
 #include "ps2_runtime_macros.h"
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "rrv_guest_scheduler.h"
+#include <atomic>
+// Defined in ps2xRuntime (Kernel/Stubs/Pad.cpp): host buttons OR-ed into the pad state (MAGATAMA_HD_VOICE_AUTO).
+extern std::atomic<uint32_t> g_rrvPadInjectButtons;
 
 #include <atomic>
 #include <cmath>
@@ -49,6 +53,8 @@
 #include <cstddef>
 #include <mutex>
 #include <string>
+#include <fstream>
+#include <thread>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -1589,6 +1595,179 @@ void fastRunTimeCount(uint8_t* ram,R5900Context* c,PS2Runtime* rt){
     }
     g_runTimeCount(ram,c,rt);
 }
+
+#if defined(MAGATAMA_SOUND_DRIVER)
+// ── MAGATAMA_HD_VOICE_DIR=<folder>: voice acting from the player's own Nocturne HD install ────────────────
+// The folder holds what tools/hdvoice/hdvoice_extract.py pulls out of the player's HD copy (nothing ships with
+// Magatama): map.tsv ("<fnv64 of a PS2 page's text>\t<clip>") and the clips as <clip>_e.wav (English) and
+// <clip>.wav (Japanese). HD keeps the PS2 scripts and only swaps each text page for a <E601_L0000> tag, so a
+// page's PS2 text names its clip exactly. A host thread watches the message windows (the open-message routine
+// 0x1CDB80 stores the dialog header at window+0x2C; the window table is at 0x56BE8C, 20 bytes per window) and
+// plays the clip when the page on screen changes. MAGATAMA_HD_VOICE_LANG=ja picks Japanese,
+// MAGATAMA_HD_VOICE_LOG=1 prints each page and what played.
+namespace {
+struct HdVoice {
+    std::string dir; bool japanese = false, log = false, autoAdvance = false; float volume = 1.0f;
+    std::map<uint64_t, std::string> map;
+    uint8_t* rdram = nullptr;
+    std::atomic<bool> started{false};
+    PS2Runtime::RecompiledFunction openOrig = nullptr;
+    rrv::audio::SoundHandle current;
+};
+HdVoice& hdv() { static HdVoice v; return v; }
+uint64_t hdvKey(const uint8_t* p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n && i < 48 && p[i]; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    return h;
+}
+bool hdvReadWav(const std::string& path, std::vector<int16_t>& mono, uint32_t& rate) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (d.size() < 44 || std::memcmp(d.data(), "RIFF", 4) || std::memcmp(d.data() + 8, "WAVE", 4)) return false;
+    uint16_t fmt = 0, ch = 0, bits = 0; size_t pos = 12; const uint8_t* data = nullptr; uint32_t dataLen = 0;
+    while (pos + 8 <= d.size()) {
+        uint32_t len; std::memcpy(&len, &d[pos + 4], 4);
+        if (!std::memcmp(&d[pos], "fmt ", 4) && pos + 24 <= d.size()) {
+            std::memcpy(&fmt, &d[pos + 8], 2); std::memcpy(&ch, &d[pos + 10], 2);
+            std::memcpy(&rate, &d[pos + 12], 4); std::memcpy(&bits, &d[pos + 22], 2);
+        } else if (!std::memcmp(&d[pos], "data", 4)) { data = &d[pos + 8]; dataLen = uint32_t(std::min<size_t>(len, d.size() - pos - 8)); break; }
+        pos += 8 + len + (len & 1);
+    }
+    if (!data || !ch || !rate || (bits != 16 && !(fmt == 3 && bits == 32))) return false;
+    const size_t bytes = bits / 8, frames = dataLen / (bytes * ch);
+    mono.resize(frames);
+    for (size_t i = 0; i < frames; ++i) {
+        float s = 0;
+        for (uint16_t c = 0; c < ch; ++c) {
+            const uint8_t* q = data + (i * ch + c) * bytes;
+            if (bits == 16) { int16_t v; std::memcpy(&v, q, 2); s += v; }
+            else { float v; std::memcpy(&v, q, 4); s += v * 32767.0f; }
+        }
+        mono[i] = int16_t(std::clamp(s / ch, -32768.0f, 32767.0f));
+    }
+    return frames > 0;
+}
+void hdvPlay(const std::string& clip) {
+    HdVoice& v = hdv();
+    std::vector<int16_t> pcm; uint32_t rate = 0;
+    const std::string base = v.dir + "/" + clip;
+    const bool ok = hdvReadWav(base + (v.japanese ? ".wav" : "_e.wav"), pcm, rate) ||
+                    hdvReadWav(base + (v.japanese ? "_e.wav" : ".wav"), pcm, rate);
+    if (v.current) rrv::audio::stop(v.current);
+    v.current = {};
+    if (!ok) { if (v.log) std::fprintf(stderr, "[hd-voice] %s: no clip file\n", clip.c_str()); return; }
+    // createMonoSound applies the centred pan law (0.6875); undo it so a voice line plays at full level.
+    v.current = rrv::audio::createMonoSound(pcm.data(), pcm.size(), rate, 1.0f, v.volume / 0.6875f * 0.75f);
+    rrv::audio::play(v.current);
+    if (v.log) std::fprintf(stderr, "[hd-voice] play %s (%.2fs)\n", clip.c_str(), double(pcm.size()) / rate);
+}
+// The page's text, wherever the dialog's line table points (relocated pointers, or offsets from the MSG1 base).
+const uint8_t* hdvPage(uint8_t* ram, uint32_t dlg, uint32_t page) {
+    const uint32_t lines = guest32(ram, dlg + 0x18) & 0xFFFFu;
+    if (page >= lines || lines > 64) return nullptr;
+    uint32_t p = guest32(ram, dlg + 0x1C + 4 * page);
+    if (p < 0x100000u || p >= 0x2000000u) {
+        uint32_t base = 0;
+        for (uint32_t a = dlg & ~3u; a > 0x100000u && a + 0x10000u > dlg; a -= 4)
+            if (!std::memcmp(ram + (a & 0x1FFFFFFu), "MSG1", 4)) { base = a - 8; break; }
+        if (!base) return nullptr;
+        p = base + 0x20 + p;
+    }
+    return ram + (p & 0x1FFFFFFu);
+}
+void hdvWatch() {
+    HdVoice& v = hdv();
+    uint32_t lastDlg[16] = {}, lastPage[16] = {};
+    uint8_t lastWin[16][0x60] = {};
+    using clk = std::chrono::steady_clock;
+    clk::time_point quiet = clk::now(), lastPress = clk::now(), release{};
+    bool waiting = false, pressing = false;
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        uint8_t* ram = v.rdram;
+        waiting = false;
+        for (int w = 0; w < 16; ++w) {
+            const uint32_t win = guest32(ram, 0x56BE8Cu + 20u * w);
+            if (win < 0x100000u || win >= 0x2000000u) continue;
+            const uint32_t dlg = guest32(ram, win + 0x2C);
+            if (dlg < 0x100000u || dlg >= 0x2000000u) continue;
+            const uint32_t page = guest32(ram, win + 0x3C) & 0xFFFFu;
+            if ((guest32(ram, win) & 0xFu) == 4u && page < (guest32(ram, dlg + 0x18) & 0xFFFFu)) waiting = true; // page shown, waiting for a press
+            if (v.log && (dlg != lastDlg[w] || std::memcmp(lastWin[w], ram + (win & 0x1FFFFFFu), 0x60))) {
+                // Diagnostics for finding the page field: which halfwords of the window changed.
+                std::string diff;
+                for (int o = 0; o < 0x60; o += 2) {
+                    uint16_t a, b; std::memcpy(&a, lastWin[w] + o, 2); std::memcpy(&b, ram + (win & 0x1FFFFFFu) + o, 2);
+                    if (a != b) { char t[32]; std::snprintf(t, sizeof t, " +%02x:%x>%x", o, a, b); diff += t; }
+                }
+                if (dlg != lastDlg[w] || diff.find("+3c") != std::string::npos || diff.size() < 120)
+                    std::fprintf(stderr, "[hd-voice] win%d %08x dlg=%08x \"%s\" page=%u%s\n", w, win, dlg,
+                                 guestString(ram, dlg).c_str(), page, diff.c_str());
+                std::memcpy(lastWin[w], ram + (win & 0x1FFFFFFu), 0x60);
+            }
+            if (dlg == lastDlg[w] && page == lastPage[w]) continue;
+            lastDlg[w] = dlg; lastPage[w] = page; quiet = clk::now();
+            const uint8_t* text = hdvPage(ram, dlg, page);
+            if (!text) continue;
+            const uint64_t key = hdvKey(text, 48);
+            const auto it = v.map.find(key);
+            if (v.log) std::fprintf(stderr, "[hd-voice] page \"%s\" #%u key=%016llx -> %s\n", guestString(ram, dlg).c_str(), page,
+                                    (unsigned long long)key, it == v.map.end() ? "(none)" : it->second.c_str());
+            if (it != v.map.end()) hdvPlay(it->second);
+        }
+        // MAGATAMA_HD_VOICE_AUTO=1 (demos): once the line on screen has been spoken and the game waits, press Cross;
+        // anything else that waits quietly for 6 s (a choice, an unvoiced page) gets the default answer too.
+        if (!v.autoAdvance) continue;
+        const auto now = clk::now();
+        if (pressing) { if (now >= release) { g_rrvPadInjectButtons.store(0); pressing = false; lastPress = now; } continue; }
+        if (v.current && rrv::audio::playing(v.current)) { quiet = now; continue; }
+        if (now - lastPress < std::chrono::milliseconds(1500)) continue;
+        if ((waiting && now - quiet >= std::chrono::milliseconds(900)) || now - quiet >= std::chrono::seconds(6)) {
+            g_rrvPadInjectButtons.store(1u << 14); // HostPadButtonCross
+            pressing = true; release = now + std::chrono::milliseconds(120); quiet = now;
+            if (v.log) std::fprintf(stderr, "[hd-voice] auto-advance (%s)\n", waiting ? "line finished" : "idle");
+        }
+    }
+}
+void hdvOpenMessage(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    HdVoice& v = hdv();
+    if (!v.started.exchange(true)) { v.rdram = rdram; std::thread(hdvWatch).detach(); }
+    const uint32_t window = GPR_U32(ctx, 4), message = GPR_U32(ctx, 5);
+    v.openOrig(rdram, ctx, runtime);
+    if (v.log) {
+        const uint32_t win = guest32(rdram, 0x56BE8Cu + 20u * (window & 15u));
+        std::fprintf(stderr, "[hd-voice] open window=%u message=%u \"%s\" cycle=%llu\n", window, message,
+                     win ? guestString(rdram, guest32(rdram, win + 0x2C)).c_str() : "", (unsigned long long)runtime->gate4NativeCyclesV1());
+    }
+}
+void armHdVoice(PS2Runtime& runtime) {
+    // MAGATAMA_HD_VOICE=1 uses the folder the extractor writes by default (~/magatama/hdvoice/out).
+    std::string dir = std::getenv("MAGATAMA_HD_VOICE_DIR") ? std::getenv("MAGATAMA_HD_VOICE_DIR") : "";
+    if (const char* on = std::getenv("MAGATAMA_HD_VOICE"); dir.empty() && on && on[0] == '1' && std::getenv("HOME"))
+        dir = std::string(std::getenv("HOME")) + "/magatama/hdvoice/out";
+    if (dir.empty() || !runtime.hasFunction(0x1CDB80u)) return;
+    HdVoice& v = hdv();
+    v.dir = dir;
+    if (const char* l = std::getenv("MAGATAMA_HD_VOICE_LANG"); l && (l[0] == 'j' || l[0] == 'J')) v.japanese = true;
+    if (const char* l = std::getenv("MAGATAMA_HD_VOICE_LOG"); l && l[0] == '1') v.log = true;
+    if (const char* l = std::getenv("MAGATAMA_HD_VOICE_AUTO"); l && l[0] == '1') v.autoAdvance = true;
+    if (const char* l = std::getenv("MAGATAMA_HD_VOICE_VOLUME")) v.volume = std::clamp(std::atoi(l), 0, 200) / 100.0f;
+    std::ifstream f(v.dir + "/map.tsv");
+    std::string line;
+    while (std::getline(f, line)) {
+        const size_t tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        v.map[std::strtoull(line.substr(0, tab).c_str(), nullptr, 16)] = line.substr(tab + 1);
+    }
+    v.openOrig = runtime.lookupFunction(0x1CDB80u);
+    runtime.registerFunction(0x1CDB80u, hdvOpenMessage);
+    std::fprintf(stderr, "[hd-voice] %zu voiced pages from %s (%s)\n", v.map.size(), dir.c_str(), v.japanese ? "Japanese" : "English");
+}
+} // namespace
+#else
+namespace { void armHdVoice(PS2Runtime&) {} }
+#endif
 void armFastLoadWait(PS2Runtime& rt){
     const char* v=std::getenv("MAGATAMA_FAST_LOAD_WAIT");
     if(v&&v[0]=='0')return;
@@ -1762,6 +1941,7 @@ void registerPatches(PS2Runtime& runtime)
     armFreeCamera(runtime);
     armNocturneAspect(runtime);
     armFastLoadWait(runtime);
+    armHdVoice(runtime);
     if (const char* vr = std::getenv("MAGATAMA_TRACE_VRAM"); vr && vr[0] == '1') armVramTrace(runtime);
     if (const char* snd = std::getenv("MAGATAMA_TRACE_SOUND"); snd && snd[0] == '1') {
         armSoundTrace(runtime);

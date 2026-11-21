@@ -89,6 +89,22 @@ void mix(float* output, size_t samples)
         state.outputProbe->observe(output,samples/2,ns);
     }
     if(state.muted)std::fill_n(output,samples,0.0f);
+    // MAGATAMA_AUDIO_DUMP=<file>: append the final mix (float32 stereo at the device rate) for making demo videos.
+    static FILE* dump = []() -> FILE* {
+        const char* v = std::getenv("MAGATAMA_AUDIO_DUMP");
+        if (!v || !v[0] || v[0] == '0') return nullptr;
+        std::string path = v;
+        if (path == "1") { // next to the frame captures when there are any, else in the home folder
+            const char* cap = std::getenv("RRV_GATE4_GS_CAPTURE_DIR");
+            const char* home = std::getenv("HOME");
+            path = std::string(cap && cap[0] ? cap : home ? home : ".") + "/audio-f32-stereo.raw";
+        }
+        FILE* f = std::fopen(path.c_str(), "wb");
+        if (f) std::fprintf(stderr, "[audio] dumping the mix to %s (float32 stereo, %d Hz) start-epoch-ms=%lld\n", path.c_str(), device().spec.freq,
+                            (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+        return f;
+    }();
+    if (dump) { std::fwrite(output, sizeof(float), samples, dump); std::fflush(dump); }
 }
 
 void callback(void*, Uint8* stream, int length)

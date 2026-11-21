@@ -1,9 +1,14 @@
+#include <atomic>
 #include "Common.h"
 #include "Pad.h"
 #include "runtime/ps2_pad.h"
 
 #include <array>
 #include <chrono>
+
+// Demo/accessibility hook: host buttons OR-ed into every port's state (Magatama's MAGATAMA_HD_VOICE_AUTO
+// presses Cross when a voiced line has finished). Zero = no effect.
+std::atomic<uint32_t> g_rrvPadInjectButtons{0};
 
 namespace ps2_stubs
 {
@@ -133,7 +138,7 @@ namespace ps2_stubs
             const bool r2DigitalFallback = !capabilities.analogTriggers && (host.pressedButtons & HostPadButtonR2) != 0;
             portState.l2DigitalPressed = triggerDigital(portState.l2DigitalPressed, l2, l2DigitalFallback);
             portState.r2DigitalPressed = triggerDigital(portState.r2DigitalPressed, r2, r2DigitalFallback);
-            const uint32_t pressed = (host.pressedButtons & ~(static_cast<uint32_t>(HostPadButtonL2) |
+            const uint32_t pressed = ((host.pressedButtons | g_rrvPadInjectButtons.load(std::memory_order_relaxed)) & ~(static_cast<uint32_t>(HostPadButtonL2) |
                 static_cast<uint32_t>(HostPadButtonR2))) |
                 (portState.l2DigitalPressed ? HostPadButtonL2 : 0u) |
                 (portState.r2DigitalPressed ? HostPadButtonR2 : 0u);

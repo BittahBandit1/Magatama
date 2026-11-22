@@ -4520,14 +4520,18 @@ index f944d4b..7ae176d 100644
  	if (GSConfig.LoadTextureReplacements)
  		GSTextureReplacements::ProcessAsyncLoadedTextures();
  
-@@ -3828,6 +3837,18 @@ void GSRendererHW::Draw()
+@@ -3828,6 +3837,22 @@ void GSRendererHW::Draw()
  		target_scale = src->m_from_target->GetScale();
  	}
  
 +	// RRV (GSRrvSetSceneScale): the 3D at the scene scale, the 2D over it at the configured scale.
 +	if (s_rrv_scene_scale > 0.0f && target_scale == GetTextureScaleFactor() && !IsPossibleChannelShuffle() && !m_downscale_source)
 +	{
-+		const bool depth = m_cached_ctx.DepthWrite() || (m_cached_ctx.TEST.ZTE && m_cached_ctx.TEST.ZTST > ZTST_ALWAYS);
++		// Nocturne draws its dialogue band, text and menus as sprites at one depth at the far end of the range
++		// (Z=0xfffff0, ZTST GEQUAL): depth-tested, but a flat 2D layer, so they stay at the HUD's scale.
++		const bool flat_2d = m_vt.m_primclass == GS_SPRITE_CLASS && m_vt.m_min.p.z == m_vt.m_max.p.z &&
++			m_vt.m_max.p.z >= 16773120.0f; // 0xFFF000
++		const bool depth = !flat_2d && (m_cached_ctx.DepthWrite() || (m_cached_ctx.TEST.ZTE && m_cached_ctx.TEST.ZTST > ZTST_ALWAYS));
 +		if (depth)
 +			m_rrv_in_scene = true;
 +		else if (m_vt.m_primclass == GS_SPRITE_CLASS)

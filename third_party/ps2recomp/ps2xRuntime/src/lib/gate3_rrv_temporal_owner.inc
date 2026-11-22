@@ -30,7 +30,7 @@ uint64_t TemporalOwner::NextDeadline() const {
     next = std::min(next, HDeadline());
     if (auto timer = timers_.next_irq_deadline()) next = std::min(next, *timer);
     for (const auto& [id, alarm] : alarms_) next = std::min(next, alarm.deadline);
-    if (!admissions_.empty()) next = std::min(next, admissions_.front().cycle);
+    if (!admissions_.empty()) next = std::min(next, admissions_.back().cycle); // kept latest-first: back() is next
     return next;
 }
 void TemporalOwner::CollectTimerCauses() {
@@ -84,8 +84,8 @@ void TemporalOwner::HardwareTo(uint64_t target) {
         std::sort(due.begin(),due.end(),[](const auto& a,const auto& b){return a.second.sequence<b.second.sequence;});
         ready_alarms_.insert(ready_alarms_.end(),due.begin(),due.end());
         if (cut()) return; // Full hardware batch, before data or guest callbacks.
-        while (!admissions_.empty() && admissions_.front().cycle == at) {
-            auto admission=std::move(admissions_.front()); admissions_.erase(admissions_.begin());
+        while (!admissions_.empty() && admissions_.back().cycle == at) {
+            auto admission=std::move(admissions_.back()); admissions_.pop_back();
             admission.commit(); // Data readiness may block host here; time stays at at.
         }
         if (cut()) return; // Entire same-cycle hardware batch precedes the cut.
@@ -185,8 +185,18 @@ std::optional<std::pair<int,TemporalOwner::Alarm>> TemporalOwner::PopAlarm(){
 void TemporalOwner::Admit(Admission admission){
     rrv::guest_time::QuietBump(); quiet_until_=0;
     if(admission.cycle<now_)throw std::logic_error("Gate3 late admission");
-    for(const auto& existing:admissions_)if(existing.sequence==admission.sequence)throw std::logic_error("Gate3 duplicate admission identity");
-    admissions_.push_back(std::move(admission));
-    std::stable_sort(admissions_.begin(),admissions_.end(),[](const auto& a,const auto& b){return std::tie(a.cycle,a.sequence)<std::tie(b.cycle,b.sequence);});
+    // Kept latest-first, so the next admission is at the back (O(1) commit) and a new one, usually near-term
+    // (IPU worker deadlines every 64 cycles while a movie plays), goes in by binary search close to the back.
+    // A replay pre-admits its whole recorded pad (thousands of entries); re-sorting and scanning all of them on
+    // every admission made movies crawl at about a quarter of real speed in long replays.
+    const auto later=[](const Admission& a,const Admission& b){return std::tie(a.cycle,a.sequence)>std::tie(b.cycle,b.sequence);};
+    if(admissions_.size()<256){
+        for(const auto& existing:admissions_)if(existing.sequence==admission.sequence)throw std::logic_error("Gate3 duplicate admission identity");
+    }else{
+        // Sequences are issued in increasing order per source; a repeat lands on an equal key.
+        auto same=std::equal_range(admissions_.begin(),admissions_.end(),admission,later);
+        for(auto it=same.first;it!=same.second;++it)if(it->sequence==admission.sequence)throw std::logic_error("Gate3 duplicate admission identity");
+    }
+    admissions_.insert(std::lower_bound(admissions_.begin(),admissions_.end(),admission,later),std::move(admission));
 }
 }

@@ -265,6 +265,14 @@ const std::vector<Spec> &schema()
          Kind::integer, "100", {}, 0, 100, Apply::live},
         {"audio", "mute", "Mute", "Silence the game. Unmute restores your volume setting.",
          Kind::boolean, "false", {}, 0, 0, Apply::live},
+        // Nocturne HD's voice acting, played on the PS2 game's own text pages (patches.cpp armHdVoice). The clips come
+        // from the player's own HD copy via tools/hdvoice/hdvoice_extract.py; nothing ships with Magatama.
+        {"audio", "hd_voice", "HD voice acting",
+         "Plays Nocturne HD's voice acting in story scenes. Needs the voices pulled from your own HD copy first "
+         "(tools/hdvoice). Restart to apply.",
+         Kind::choice, "off", {"off", "english", "japanese"}, 0, 0, Apply::restart},
+        {"audio", "hd_voice_volume", "Voice volume (%)", "Loudness of the HD voice acting. Restart to apply.",
+         Kind::integer, "100", {}, 0, 200, Apply::restart},
         // [display]
         {"display", "ratio", "Widescreen", "Real widescreen: the game renders a wider view. 4:3 is the stock game.",
          Kind::choice, "16:9", {"4:3", "16:9", "16:10", "21:9"}, 0, 0, Apply::restart, false}, // Magatama: RR5 camera patch
@@ -504,6 +512,8 @@ std::vector<std::pair<std::string,std::string>> magatamaSavedEnvironment(const I
         {"input","analog","RRV_PAD_ANALOG",true},
         {"input","rumble","RRV_PAD_RUMBLE",true},
         {"input","touch_controls","MAGATAMA_TOUCH_CONTROLS",true},
+        {"audio","hd_voice","MAGATAMA_HD_VOICE",false},               // off | english | japanese
+        {"audio","hd_voice_volume","MAGATAMA_HD_VOICE_VOLUME",false},
         {"timing","split_gs","RRV_VU1GS_SPLIT",true},
         {"timing","pacer_spin","RRV_GATE3_REALTIME_SPIN_MS",false},
     };
@@ -536,6 +546,8 @@ bool valid(const Spec &spec, std::string_view value)
         return matches(value, "[0-9]+([.][0-9]+)?");
     if (key == "draw_distance")
         return matches(value, "[0-9]+") && std::stoll(std::string(value).substr(0, 18)) <= 16;
+    if (key == "hd_voice_volume")
+        return value.size() <= 3 && matches(value, "[0-9]+") && std::stoi(std::string(value)) <= 200;
     if (key == "pacer_spin")
         return matches(value, "[0-9]+") && std::stoll(std::string(value).substr(0, 18)) <= 17;
     if (key == "from")
@@ -578,6 +590,7 @@ const std::vector<std::string_view> &userEnvAllowlist()
         "RRV_RR5_CAR_LOD",              "RRV_RR5_DRAW_DISTANCE",         "RRV_RR5_FAST_UNPACK",
         "RRV_RR5_NATIVE_HOT",           "RRV_RR5_WIDESCREEN",            "RRV_RR5_CAR_ZTIE",
         "RRV_PCSX2_GS_BACKEND",         "RRV_DISPLAY_REFRESH",           "RRV_PCSX2_GS_VRR",
+        "MAGATAMA_HD_VOICE",            "MAGATAMA_HD_VOICE_VOLUME",
         "RRV_PCSX2_GS_SPRITE_FILTER",   "RRV_DISPLAY_LOCK",              "RRV_AUDIO_RATE_CONTROL",
     };
     return names;

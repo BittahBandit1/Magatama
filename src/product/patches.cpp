@@ -1634,6 +1634,44 @@ bool hdvReadWav(const std::string& path, std::vector<int16_t>& mono, uint32_t& r
         } else if (!std::memcmp(&d[pos], "data", 4)) { data = &d[pos + 8]; dataLen = uint32_t(std::min<size_t>(len, d.size() - pos - 8)); break; }
         pos += 8 + len + (len & 1);
     }
+    if (data && ch && rate && fmt == 0x11) { // IMA ADPCM (what the extractor stores: about a quarter of 16-bit PCM)
+        uint16_t align = 0;
+        for (size_t p = 12; p + 8 <= d.size();) { // blockAlign from the fmt chunk
+            uint32_t len; std::memcpy(&len, &d[p + 4], 4);
+            if (!std::memcmp(&d[p], "fmt ", 4)) { std::memcpy(&align, &d[p + 8 + 12], 2); break; }
+            p += 8 + len + (len & 1);
+        }
+        static const int16_t steps[89] = {7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,
+            107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,
+            1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,
+            12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767};
+        static const int8_t idx[16] = {-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8};
+        if (align < 4u * ch) return false;
+        mono.clear();
+        std::vector<std::vector<int16_t>> chans(ch);
+        for (uint32_t b = 0; b + align <= dataLen; b += align) {
+            const uint8_t* blk = data + b;
+            int pred[2] = {}, si[2] = {};
+            for (uint16_t c = 0; c < ch && c < 2; ++c) {
+                int16_t p0; std::memcpy(&p0, blk + 4 * c, 2); pred[c] = p0; si[c] = std::min<int>(blk[4 * c + 2], 88);
+                chans[c].push_back(int16_t(pred[c]));
+            }
+            auto nib = [&](int c, int n) {
+                const int step = steps[si[c]], diff = ((2 * (n & 7) + 1) * step) >> 3; // the precise IMA form ffmpeg encodes for
+                pred[c] = std::clamp(pred[c] + ((n & 8) ? -diff : diff), -32768, 32767);
+                si[c] = std::clamp(si[c] + idx[n], 0, 88);
+                chans[c].push_back(int16_t(pred[c]));
+            };
+            const uint8_t* q = blk + 4 * ch; const uint8_t* end = blk + align;
+            while (q + 4 * ch <= end)                       // 4 bytes (8 samples) per channel, interleaved
+                for (uint16_t c = 0; c < ch && c < 2; ++c, q += 4)
+                    for (int k = 0; k < 4; ++k) { nib(c, q[k] & 15); nib(c, q[k] >> 4); }
+        }
+        mono.resize(chans[0].size());
+        for (size_t i = 0; i < mono.size(); ++i)
+            mono[i] = ch > 1 && i < chans[1].size() ? int16_t((chans[0][i] + chans[1][i]) / 2) : chans[0][i];
+        return !mono.empty();
+    }
     if (!data || !ch || !rate || (bits != 16 && !(fmt == 3 && bits == 32))) return false;
     const size_t bytes = bits / 8, frames = dataLen / (bytes * ch);
     mono.resize(frames);
@@ -1678,8 +1716,8 @@ const uint8_t* hdvPage(uint8_t* ram, uint32_t dlg, uint32_t page) {
 }
 void hdvWatch() {
     HdVoice& v = hdv();
-    uint32_t lastDlg[16] = {}, lastPage[16] = {};
-    uint8_t lastWin[16][0x60] = {};
+    uint32_t lastDlg[32] = {}, lastPage[32] = {};
+    uint8_t lastWin[32][0x60] = {};
     using clk = std::chrono::steady_clock;
     clk::time_point quiet = clk::now(), lastPress = clk::now(), release{};
     bool waiting = false, pressing = false;
@@ -1687,11 +1725,13 @@ void hdvWatch() {
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
         uint8_t* ram = v.rdram;
         waiting = false;
-        for (int w = 0; w < 16; ++w) {
+        for (int w = 0; w < 32; ++w) {
             const uint32_t win = guest32(ram, 0x56BE8Cu + 20u * w);
             if (win < 0x100000u || win >= 0x2000000u) continue;
             const uint32_t dlg = guest32(ram, win + 0x2C);
             if (dlg < 0x100000u || dlg >= 0x2000000u) continue;
+            const uint8_t* name = ram + (dlg & 0x1FFFFFFu); // a dialog header starts with its name: printable ASCII
+            if (name[0] < 0x21 || name[0] > 0x7E) continue;
             const uint32_t page = guest32(ram, win + 0x3C) & 0xFFFFu;
             if ((guest32(ram, win) & 0xFu) == 4u && page < (guest32(ram, dlg + 0x18) & 0xFFFFu)) waiting = true; // page shown, waiting for a press
             if (v.log && (dlg != lastDlg[w] || std::memcmp(lastWin[w], ram + (win & 0x1FFFFFFu), 0x60))) {
@@ -1736,19 +1776,34 @@ void hdvOpenMessage(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
     const uint32_t window = GPR_U32(ctx, 4), message = GPR_U32(ctx, 5);
     v.openOrig(rdram, ctx, runtime);
     if (v.log) {
-        const uint32_t win = guest32(rdram, 0x56BE8Cu + 20u * (window & 15u));
+        const uint32_t win = guest32(rdram, 0x56BE8Cu + 20u * (window & 31u));
         std::fprintf(stderr, "[hd-voice] open window=%u message=%u \"%s\" cycle=%llu\n", window, message,
                      win ? guestString(rdram, guest32(rdram, win + 0x2C)).c_str() : "", (unsigned long long)runtime->gate4NativeCyclesV1());
     }
 }
 void armHdVoice(PS2Runtime& runtime) {
-    // MAGATAMA_HD_VOICE=1 uses the folder the extractor writes by default (~/magatama/hdvoice/out).
+    // MAGATAMA_HD_VOICE = off | english | japanese (the [audio] hd_voice setting; 1 = english). On, it uses
+    // MAGATAMA_HD_VOICE_DIR, else the folder the extractor writes by default (~/magatama/hdvoice/out).
+    const std::string mode = std::getenv("MAGATAMA_HD_VOICE") ? std::getenv("MAGATAMA_HD_VOICE") : "";
+    const bool wantJapanese = mode == "japanese" || mode == "ja";
+    const bool on = mode == "1" || mode == "english" || mode == "en" || wantJapanese;
     std::string dir = std::getenv("MAGATAMA_HD_VOICE_DIR") ? std::getenv("MAGATAMA_HD_VOICE_DIR") : "";
-    if (const char* on = std::getenv("MAGATAMA_HD_VOICE"); dir.empty() && on && on[0] == '1' && std::getenv("HOME"))
-        dir = std::string(std::getenv("HOME")) + "/magatama/hdvoice/out";
+    if (!on && (mode == "0" || mode == "off")) return;
+    if (dir.empty() && on) { // next to the settings file (every platform), else the extractor's default folder
+        if (const char* ini = std::getenv("RRV_FUKAMI_INI"); ini && ini[0]) {
+            std::string d = ini; d = d.substr(0, d.find_last_of("/\\") == std::string::npos ? 0 : d.find_last_of("/\\"));
+            if (!d.empty() && std::ifstream(d + "/hdvoice/map.tsv")) dir = d + "/hdvoice";
+        }
+        if (dir.empty() && std::getenv("HOME")) dir = std::string(std::getenv("HOME")) + "/magatama/hdvoice/out";
+    }
     if (dir.empty() || !runtime.hasFunction(0x1CDB80u)) return;
+    if (!std::ifstream(dir + "/map.tsv")) {
+        std::fprintf(stderr, "[hd-voice] on, but %s/map.tsv is missing: run tools/hdvoice/hdvoice_extract.py first\n", dir.c_str());
+        return;
+    }
     HdVoice& v = hdv();
     v.dir = dir;
+    v.japanese = wantJapanese;
     if (const char* l = std::getenv("MAGATAMA_HD_VOICE_LANG"); l && (l[0] == 'j' || l[0] == 'J')) v.japanese = true;
     if (const char* l = std::getenv("MAGATAMA_HD_VOICE_LOG"); l && l[0] == '1') v.log = true;
     if (const char* l = std::getenv("MAGATAMA_HD_VOICE_AUTO"); l && l[0] == '1') v.autoAdvance = true;

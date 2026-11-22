@@ -8,8 +8,12 @@ their HD install, and writes, locally:
 HD kept the PS2 event scripts and replaced each text page with a tag like <E601_L0000> naming its voice clip,
 so matching the two scripts message by message and page by page gives an exact table.
 
-  python3 hdvoice_extract.py --disc <folder with DDS3.DDT> --hd <smt3hd folder> [--out DIR] [--events e601,e602]
-Needs UnityPy (pip install UnityPy).
+  python3 hdvoice_extract.py --disc <folder with DDS3.DDT> --hd <smt3hd folder> [--out DIR] [--only e601,f024]
+                             [--lang en|ja|both] [--compact]
+Covers story events (HD bundles eNNN, PS2 /event/.../eNNN.bf) and field conversations (HD bundles fNNN, PS2
+/fld/f/fNNN/fNNN.bf). A script's clips live in HD bundle "e" + the number in their tag (E601_ -> e601, F024_ -> e024).
+Clips are stored mono, 16-bit, at HD's rate (half HD's size; --compact: IMA ADPCM, about an eighth, some hiss).
+Needs UnityPy (pip install UnityPy); ffmpeg on PATH for the conversion (without it clips are kept as HD has them).
 """
 import argparse, os, re, struct, sys
 
@@ -51,17 +55,34 @@ def key(page):  # must match hdvKey() in src/product/patches.cpp
 
 TAG = re.compile(rb"<([A-Z]\d{3}_L\d{4})>")
 
+def convert(data, dst, compact):
+    """Write HD's WAV bytes to dst as mono 16-bit PCM (or IMA ADPCM with compact) via ffmpeg; raw copy without it."""
+    import shutil, subprocess
+    if shutil.which("ffmpeg"):
+        codec = "adpcm_ima_wav" if compact else "pcm_s16le"
+        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "wav", "-i", "pipe:0", "-ac", "1", "-c:a", codec, dst],
+                           input=data, capture_output=True)
+        if r.returncode == 0: return
+    open(dst, "wb").write(data)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--disc", required=True); ap.add_argument("--hd", required=True)
     ap.add_argument("--out", default=os.path.expanduser("~/magatama/hdvoice/out"))
-    ap.add_argument("--events", default="")
+    ap.add_argument("--only", "--events", dest="only", default="", help="comma list of HD script bundles (e601,f024)")
+    ap.add_argument("--lang", default="both", choices=["en", "ja", "both"])
+    ap.add_argument("--compact", action="store_true")
     a = ap.parse_args()
     import UnityPy
     pc = os.path.join(a.hd, "smt3hd_Data", "StreamingAssets", "PC")
     files = ddt_files(a.disc)
-    ps2 = {os.path.basename(p)[:-3]: p for p in files if p.startswith("/event/") and p.endswith(".bf")}
-    events = [e for e in a.events.split(",") if e] or sorted(n for n in os.listdir(pc) if re.fullmatch(r"e\d{3}", n) and n in ps2)
+    ps2 = {}
+    for p in files:
+        if p.endswith(".bf") and (p.startswith("/event/") or p.startswith("/fld/")):
+            ps2.setdefault(os.path.basename(p)[:-3], p)
+    names = [e for e in a.only.split(",") if e] or sorted(
+        n for n in os.listdir(pc) if re.fullmatch(r"[ef]\d{3}", n) and n in ps2)
+    suffixes = {"en": ["_e"], "ja": [""], "both": ["", "_e"]}[a.lang]
     os.makedirs(a.out, exist_ok=True)
     img = open(os.path.join(a.disc, "DDS3.IMG"), "rb")
     mp = {}
@@ -69,40 +90,48 @@ def main():
     if os.path.exists(mpath):
         for line in open(mpath):
             k, v = line.rstrip("\n").split("\t"); mp[int(k, 16)] = v
-    for ev in events:
-        if ev not in ps2 or not os.path.exists(os.path.join(pc, ev)): print(ev, "skipped"); continue
-        sec, size = files[ps2[ev]]; img.seek(sec * 2048); pbf = img.read(size)
-        env = UnityPy.load(os.path.join(pc, ev))
-        hbf, clips = None, {}
-        for o in env.objects:
+    clip_cache = {}
+    def clips_of(bundle):
+        if bundle not in clip_cache:
+            path = os.path.join(pc, bundle); found = {}
+            if os.path.exists(path):
+                for o in UnityPy.load(path).objects:
+                    if o.type.name == "AudioClip": found[o.read().m_Name] = o
+            clip_cache.clear(); clip_cache[bundle] = found   # keep one bundle's objects in memory at a time
+        return clip_cache[bundle]
+    total_pages = total_clips = 0
+    for name in names:
+        if name not in ps2 or not os.path.exists(os.path.join(pc, name)): print(name, "skipped"); continue
+        sec, size = files[ps2[name]]; img.seek(sec * 2048); pbf = img.read(size)
+        hbf = None
+        for o in UnityPy.load(os.path.join(pc, name)).objects:
             if o.type.name == "TextAsset":
                 d = o.read()
-                if d.m_Name.endswith(".bf"):
+                if d.m_Name.lower().endswith(".bf"):
                     s = d.m_Script; hbf = s if isinstance(s, (bytes, bytearray)) else s.encode("utf-8", "surrogateescape")
-            elif o.type.name == "AudioClip":
-                clips[o.read().m_Name] = o
-        if hbf is None: print(ev, "no HD script"); continue
-        P, H = bmd_pages(pbf), bmd_pages(hbf)
-        want, pages = set(), 0
-        for (pn, pp), (hn, hp) in zip(P, H):
+        if hbf is None: continue
+        tagged = []
+        for (pn, pp), (hn, hp) in zip(bmd_pages(pbf), bmd_pages(hbf)):
             if pn != hn: continue
             for pg, hg in zip(pp, hp):
                 m = TAG.search(hg)
-                if not m: continue
-                c = m.group(1).decode()
-                if c in clips or c + "_e" in clips:
-                    mp[key(pg)] = c; want.add(c); pages += 1
-        n = 0
-        for c in sorted(want):
-            for nm in (c, c + "_e"):
-                o = clips.get(nm); dst = os.path.join(a.out, nm + ".wav")
+                if m: tagged.append((key(pg), m.group(1).decode()))
+        if not tagged: continue
+        pages = written = 0
+        for k, c in tagged:
+            clips = clips_of("e" + c[1:4])
+            if not any(c + s in clips for s in suffixes): continue
+            mp[k] = c; pages += 1
+            for s in suffixes:
+                o = clips.get(c + s); dst = os.path.join(a.out, c + s + ".wav")
                 if not o or os.path.exists(dst): continue
                 for _, data in o.read().samples.items():
-                    open(dst, "wb").write(data); n += 1; break
-        print(f"{ev}: {pages} voiced pages, {n} clips written", flush=True)
+                    convert(data, dst, a.compact); written += 1; break
+        total_pages += pages; total_clips += written
+        print(f"{name}: {pages} voiced pages, {written} clips written", flush=True)
         with open(mpath, "w") as f:
             for k, v in sorted(mp.items()): f.write(f"{k:016x}\t{v}\n")
-    print("map:", len(mp), "pages ->", mpath)
+    print(f"done: {total_pages} voiced pages, {total_clips} clips written; map has {len(mp)} pages -> {mpath}")
 
 if __name__ == "__main__":
     main()

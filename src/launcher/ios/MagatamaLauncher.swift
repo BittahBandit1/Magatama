@@ -99,15 +99,17 @@ struct DiscPicker: UIViewControllerRepresentable {
 
 struct LauncherView: View {
     @ObservedObject var model: LauncherModel
+    let settingsPath: String
     let onPlay: () -> Void
     @State private var picking = false
+    @State private var showingSettings = false
 
     var body: some View {
         ZStack {
             LinearGradient(colors: [Color(red: 0.05, green: 0.05, blue: 0.09), Color(red: 0.12, green: 0.08, blue: 0.16)],
                            startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea()
-            VStack(spacing: 22) {
+            VStack(spacing: 12) {
                 Spacer()
                 Text("MAGATAMA")
                     .font(.system(size: 54, weight: .heavy, design: .serif))
@@ -153,12 +155,23 @@ struct LauncherView: View {
                     }
                     .controlSize(.large)
                 }
+                if !model.importing {
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Label("Recomp Settings", systemImage: "gearshape")
+                    }
+                    .tint(.white)
+                }
                 Text("Your own Nocturne (USA) disc image: .iso, .chd or .zso")
                     .font(.footnote)
                     .foregroundColor(.white.opacity(0.45))
-                Spacer().frame(height: 24)
+                Spacer().frame(height: 8)
             }
             .padding(.horizontal, 24)
+        }
+        .fullScreenCover(isPresented: $showingSettings) {
+            RecompSettingsView(path: settingsPath)
         }
         .sheet(isPresented: $picking) {
             DiscPicker { url in
@@ -190,11 +203,13 @@ final class LauncherHostingController: UIHostingController<LauncherView> {
 }
 
 @_cdecl("magatama_ios_run_launcher")
-public func magatamaIosRunLauncher(_ discDir: UnsafePointer<CChar>) -> Int32 {
+public func magatamaIosRunLauncher(_ discDir: UnsafePointer<CChar>, _ settingsPath: UnsafePointer<CChar>) -> Int32 {
     let model = LauncherModel(discDir: String(cString: discDir))
     let window = UIWindow(frame: UIScreen.main.bounds)
     window.windowLevel = .normal + 1
-    window.rootViewController = LauncherHostingController(rootView: LauncherView(model: model) { model.play = true })
+    window.rootViewController = LauncherHostingController(rootView: LauncherView(
+        model: model, settingsPath: String(cString: settingsPath)
+    ) { model.play = true })
     window.makeKeyAndVisible()
     while !model.play {
         _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))

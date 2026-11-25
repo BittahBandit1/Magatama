@@ -1,12 +1,17 @@
 #import "MagatamaSettingsBridge.h"
 
 #include "fukami_settings.h"
+#include <TargetConditionals.h>
 
 namespace {
 namespace settings = fukami::settings;
 
 bool shown(const settings::Spec &spec)
 {
+#if TARGET_OS_IPHONE
+    if (spec.section == "display" && spec.key == "fullscreen")
+        return false; // the iOS game always fills the screen
+#endif
     return spec.inMenu && !(spec.section == "game" && spec.key == "logging");
 }
 
@@ -45,14 +50,25 @@ NSData *MagatamaReadSettings(NSString *path)
         std::string value = settings::value(*doc, spec);
         if (spec.kind == settings::Kind::boolean)
         {
-            // Desktop startup leaves mipmaps on and the VU1/GS split off unless explicitly set.
+            // Match platform startup defaults when no valid value was saved.
             if (const auto saved = doc->get(spec.section, spec.key); !saved || !settings::valid(spec, *saved))
             {
                 if (spec.key == "mipmap") value = "true";
+#if TARGET_OS_OSX
                 if (spec.key == "split_gs") value = "false";
+#endif
             }
             value = settings::boolValue(value) ? "true" : "false";
         }
+#if TARGET_OS_IPHONE
+        if (spec.key == "resolution_scale")
+        {
+            const char *fallback = std::getenv("MAGATAMA_RESOLUTION_SCALE_DEFAULT");
+            const auto saved = doc->get(spec.section, spec.key);
+            if (fallback && settings::valid(spec, fallback) && (!saved || !settings::valid(spec, *saved)))
+                value = fallback;
+        }
+#endif
         NSMutableArray *choices = [NSMutableArray array];
         for (auto choice : spec.choices)
             [choices addObject:string(choice)];

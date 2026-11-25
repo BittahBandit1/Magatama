@@ -159,9 +159,9 @@ product="$out/product"
 print "== launcher (Swift)"
 swift_target="arm64-apple-ios$minos"; (( sim )) && swift_target="arm64-apple-ios$minos-simulator"
 launcher_obj="$out/magatama-launcher.o"
-xcrun --sdk $sdkname swiftc -parse-as-library -emit-object -O -target "$swift_target" -sdk "$sdk" \
-    -module-name MagatamaLauncher -import-objc-header "$repo/src/app/magatama_disc_import.h" \
-    "$repo/src/launcher/ios/MagatamaLauncher.swift" -o "$launcher_obj" > "$out/launcher-build.log" 2>&1 ||
+xcrun --sdk $sdkname swiftc -parse-as-library -whole-module-optimization -emit-object -O -target "$swift_target" -sdk "$sdk" \
+    -module-name MagatamaLauncher -import-objc-header "$repo/src/launcher/ios/MagatamaLauncherBridge.h" \
+    "$repo/src/launcher/shared/RecompSettingsView.swift" "$repo/src/launcher/ios/MagatamaLauncher.swift" -o "$launcher_obj" > "$out/launcher-build.log" 2>&1 ||
     { print "!! launcher (Swift) failed"; tail -30 "$out/launcher-build.log"; exit 1; }
 swift_lib="$(dirname "$(xcrun --sdk $sdkname -f swiftc)")/../lib/swift/$sdkname"
 swift_link="-L$sdk/usr/lib/swift -L$swift_lib -Wl,-rpath,/usr/lib/swift"

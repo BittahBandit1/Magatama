@@ -8,6 +8,7 @@
 //   Documents/logs/run-<time>.log                               this run's log (stderr)
 // The environment matches scripts/magatama_run.sh's defaults; an explicit variable wins.
 #include "fukami_app.h"
+#include "fukami_settings.h"
 
 // This file owns main(); SDL must not rename it to SDL_main.
 #define SDL_MAIN_HANDLED 1
@@ -52,48 +53,6 @@ fs::path bundle() { return fs::path([[[NSBundle mainBundle] bundlePath] fileSyst
 void def(const char *name, const std::string &value) { setenv(name, value.c_str(), 0); }
 
 std::string g_elf;
-
-// The menu's Rendering > Metal HUD as saved in magatama.ini ([rendering] metal_hud), else the bundled defaults' value,
-// else on (the setting's default).
-bool metalHudSetting(const fs::path &ini)
-{
-    for (const fs::path &file : {ini, bundle() / "magatama-default.ini"})
-    {
-        FILE *f = std::fopen(file.c_str(), "r");
-        if (!f)
-            continue;
-        std::string section;
-        char buffer[512];
-        int found = -1;
-        while (found < 0 && std::fgets(buffer, sizeof buffer, f))
-        {
-            std::string line(buffer);
-            line.erase(0, line.find_first_not_of(" \t"));
-            while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())))
-                line.pop_back();
-            if (line.empty() || line[0] == '#' || line[0] == ';')
-                continue;
-            if (line[0] == '[')
-            {
-                section = line.substr(1, line.find(']') - 1);
-                continue;
-            }
-            const size_t eq = line.find('=');
-            if (section != "rendering" || eq == std::string::npos)
-                continue;
-            std::string key = line.substr(0, eq), value = line.substr(eq + 1);
-            while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back())))
-                key.pop_back();
-            value.erase(0, value.find_first_not_of(" \t"));
-            if (key == "metal_hud")
-                found = !(value == "false" || value == "0" || value == "off" || value == "no");
-        }
-        std::fclose(f);
-        if (found >= 0)
-            return found == 1;
-    }
-    return true;
-}
 
 // Documents/magatama-env.txt: NAME=value lines (blank lines and # comments ignored) applied before the defaults
 // below, so they win. For trying runtime options on a device without a new build. A commented template is
@@ -285,15 +244,26 @@ void startThreadCpuLog()
 }
 
 #if defined(MAGATAMA_IOS_LAUNCHER)
-extern "C" int magatama_ios_run_launcher(const char *discDir); // src/launcher/ios/MagatamaLauncher.swift
+extern "C" int magatama_ios_run_launcher(const char *discDir, const char *settingsPath); // src/launcher/ios/MagatamaLauncher.swift
 #endif
 
 int gameMain(int, char **)
 {
 #if defined(MAGATAMA_IOS_LAUNCHER)
     // The launcher (import the disc image, then Play) before the game's window exists.
-    magatama_ios_run_launcher(fs::path(g_elf).parent_path().c_str());
+    magatama_ios_run_launcher(fs::path(g_elf).parent_path().c_str(), fukami::app::iniPath().c_str());
 #endif
+    // Read after the launcher has saved its edits and before the game creates Metal or VU/GS workers.
+    namespace settings = fukami::settings;
+    const auto doc = settings::IniDocument::load(fukami::app::iniPath()).value_or(settings::IniDocument{});
+    const auto defaults = settings::IniDocument::load(fukami::app::defaultIniPath()).value_or(settings::IniDocument{});
+    const auto effective = settings::withDefaults(doc, defaults);
+    const auto hud = settings::value(effective, *settings::find("rendering", "metal_hud"));
+    def("MTL_HUD_ENABLED", settings::boolValue(hud) ? "1" : "0");
+    if (std::strcmp(std::getenv("MTL_HUD_ENABLED"), "1") == 0)
+        def("MTL_HUD_ELEMENTS", "device,layersize,memory,thermal,fps,frameinterval,gputime,presentdelay,frameintervalgraph");
+    const auto split = settings::value(effective, *settings::find("timing", "split_gs"));
+    def("RRV_VU1GS_SPLIT", settings::boolValue(split) ? "1" : "0");
     [UIApplication sharedApplication].idleTimerDisabled = YES;
     startThreadCpuLog();
     std::fprintf(stderr, "[ios] low power mode=%d thermal state=%ld\n",
@@ -376,21 +346,8 @@ int main(int argc, char **argv)
         def("RRV_PCSX2_GS_VSYNC", "1");
         def("RRV_GS_EXECUTION", "worker-sync");
         def("RRV_VU1GS_EXECUTION", "owner-async");
-        // VU1 on its own thread, the field boundary queued behind it (as on Android): the GS owner no longer runs
-        // VU1 too, and the EE does not wait for each field to drain (the iPhone 8 log of b29: 110 ms a second).
-        def("RRV_VU1GS_SPLIT", "1");
         def("RRV_FUKAMI_INI", (docs / "magatama.ini").string());
         def("MTL_SHADER_DEPTH_WORKAROUND", "0");
-        // The Metal HUD, with the device's thermal state among its metrics (Apple's "thermal" element). Any MTL_HUD_*
-        // variable makes the HUD take its whole configuration from the process (over Settings > Developer), so the
-        // metric list alone left it switched off (b24): MTL_HUD_ENABLED goes with it, following the menu's
-        // Rendering > Metal HUD (saved in magatama.ini, on by default; the menu also shows/hides it live).
-        // Read when Metal starts, so it is set here; magatama-env.txt can change either.
-        if (metalHudSetting(docs / "magatama.ini"))
-        {
-            def("MTL_HUD_ENABLED", "1");
-            def("MTL_HUD_ELEMENTS", "device,layersize,memory,thermal,fps,frameinterval,gputime,presentdelay,frameintervalgraph");
-        }
         def("MAGATAMA_IPU", "1");
         def("MAGATAMA_IPU_WORKER_TIMING", "1");
         def("RRV_VU_AOT", "1");

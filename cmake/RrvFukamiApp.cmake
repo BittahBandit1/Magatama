@@ -34,7 +34,9 @@ if(TARGET rrv-product)
         # MAGATAMA_IOS_LAUNCHER_OBJECT; its Swift runtime search paths in MAGATAMA_IOS_SWIFT_LINK).
         target_sources(rrv-product PRIVATE "${CMAKE_SOURCE_DIR}/src/app/magatama_disc_import.cpp")
         if(MAGATAMA_IOS_LAUNCHER_OBJECT)
-            target_sources(rrv-product PRIVATE "${MAGATAMA_IOS_LAUNCHER_OBJECT}")
+            set(_magatama_settings_bridge "${CMAKE_SOURCE_DIR}/src/launcher/shared/MagatamaSettingsBridge.mm")
+            target_sources(rrv-product PRIVATE "${MAGATAMA_IOS_LAUNCHER_OBJECT}" "${_magatama_settings_bridge}")
+            set_source_files_properties("${_magatama_settings_bridge}" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
             set_source_files_properties("${MAGATAMA_IOS_LAUNCHER_OBJECT}" PROPERTIES EXTERNAL_OBJECT TRUE
                 GENERATED TRUE)
             target_compile_definitions(rrv-product PRIVATE MAGATAMA_IOS_LAUNCHER=1)

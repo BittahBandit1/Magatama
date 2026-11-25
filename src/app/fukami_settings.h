@@ -150,6 +150,8 @@ struct LaunchConfig
 };
 
 struct Override { std::string section, key, value; };
+// Merge changed keys into the latest file. On macOS this serializes launcher and menu writers.
+bool updateIni(const std::filesystem::path &path, const std::vector<Override> &changes);
 // Maps a command-line flag to the setting it overrides (`--no-aa1` ->
 // rendering.aa1=false, `--ratio 4:3` -> display.ratio=4:3, ...). Returns the
 // number of argv items consumed, 0 if `argv[0]` is not a settings flag, or -1

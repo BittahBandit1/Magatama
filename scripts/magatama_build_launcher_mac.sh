@@ -21,8 +21,13 @@ xcrun clang++ -std=c++20 -O2 -I"$repo/src/app" -I"$pcsx2/3rdparty/libchdr/includ
     -o "$app/Contents/MacOS/magatama-disc-import" || { print -u2 "!! import tool failed"; exit 1; }
 
 print "== launcher (Swift)"
+xcrun clang++ -std=c++20 -O2 -fobjc-arc -target arm64-apple-macos13.0 -I"$repo/src/app" \
+    -c "$repo/src/launcher/macos/MagatamaSettingsBridge.mm" -o "$tmp/settings-bridge.o" || exit 1
+xcrun clang++ -std=c++20 -O2 -target arm64-apple-macos13.0 \
+    -c "$repo/src/app/fukami_settings.cpp" -o "$tmp/settings.o" || exit 1
 xcrun swiftc -parse-as-library -O -swift-version 5 -target arm64-apple-macos13.0 \
-    "$repo/src/launcher/macos/MagatamaLauncherMac.swift" -o "$app/Contents/MacOS/MagatamaLauncher" ||
+    -import-objc-header "$repo/src/launcher/macos/MagatamaSettingsBridge.h" \
+    "$repo/src/launcher/macos/MagatamaLauncherMac.swift" "$tmp/settings-bridge.o" "$tmp/settings.o" -lc++ -o "$app/Contents/MacOS/MagatamaLauncher" ||
     { print -u2 "!! launcher failed"; exit 1; }
 
 cat > "$app/Contents/Info.plist" <<'PLIST'

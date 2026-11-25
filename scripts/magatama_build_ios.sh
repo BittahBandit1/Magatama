@@ -5,16 +5,17 @@
 #   2. deps       static iOS libraries the PCSX2 GS bridge and the host need -> build/ios/deps
 set -u
 repo="${0:A:h:h}"
+request_file="${MAGATAMA_IOS_REQUEST_FILE:-$HOME/magatama/jobs/.ios-build-request}"
 # MAGATAMA_IOS_SIM=1 (or "sim" in the runner's request file): an iOS Simulator build in build/ios-sim, then a
 # short unattended launch in the Simulator with the Mac's ~/magatama/disc (log and screenshot to
 # ~/magatama/captures/ios-sim/).
 sim="${MAGATAMA_IOS_SIM:-0}"
-grep -qs sim "$HOME/magatama/jobs/.ios-build-request" && sim=1
+grep -qs sim "$request_file" && sim=1
 if (( sim )); then sdkname=iphonesimulator; out="$repo/build/ios-sim"; else sdkname=iphoneos; out="$repo/build/ios"; fi
 # MAGATAMA_IOS_LEGACY=1 (or "legacy" in the request file): iOS 15, A10 (ARMv8.0) baseline, 1x scale defaults,
 # build/ios-legacy, Magatama-legacy-unsigned.ipa. For A11 and older (iPod touch 7, iPhone 7/8/X); A12 and newer use main.
 legacy="${MAGATAMA_IOS_LEGACY:-0}"
-grep -qs legacy "$HOME/magatama/jobs/.ios-build-request" && legacy=1
+grep -qs legacy "$request_file" && legacy=1
 # Main: iOS 16, A12 (ARMv8.3) baseline: every device on current iOS (A12Z iPad Pros are the oldest) runs it.
 minos=16.0; ios_cpu=apple-a12; ipa_name=Magatama-unsigned.ipa; legacy_pcsx2=""
 if (( legacy && ! sim )); then
@@ -144,7 +145,7 @@ otool -l "$bridge_lib" | grep -q "path /usr/lib/swift " || install_name_tool -ad
 num_file="$HOME/magatama/ios-build-number"
 # "number=N" in the request file (or MAGATAMA_IOS_BUILD_NO) builds a variant under an existing number (e.g. the
 # legacy twin of iPhone build N) without advancing the counter.
-fixed_no="${MAGATAMA_IOS_BUILD_NO:-$(grep -os 'number=[0-9]*' "$HOME/magatama/jobs/.ios-build-request" | cut -d= -f2)}"
+fixed_no="${MAGATAMA_IOS_BUILD_NO:-$(grep -os 'number=[0-9]*' "$request_file" | cut -d= -f2)}"
 if [[ -n "$fixed_no" ]]; then build_no=$fixed_no
 else build_no=$(( $(cat "$num_file" 2>/dev/null || print 1) + 1 )); print $build_no > "$num_file"; fi
 print "== iOS build number $build_no"
@@ -230,7 +231,9 @@ if (( ! sim )); then
     # Archived as ~/magatama/ios-builds/Magatama[-legacy]-b<N>.ipa and .tipa (TrollStore opens .tipa directly).
     arch="$HOME/magatama/ios-builds"; mkdir -p "$arch"
     base="${ipa_name%-unsigned.ipa}-b$build_no"
-    cp "$ipa" "$arch/$base.ipa"; cp "$ipa" "$arch/$base.tipa"; chmod 644 "$arch/$base.ipa" "$arch/$base.tipa"
+    cp "$ipa" "$arch/$base.ipa" && cp "$ipa" "$arch/$base.tipa" &&
+        chmod 644 "$arch/$base.ipa" "$arch/$base.tipa" ||
+        { print "!! could not archive the iOS build in $arch"; exit 1; }
     print "== done: ~/magatama/ios-builds/$base.ipa and $base.tipa"
     exit 0
 fi

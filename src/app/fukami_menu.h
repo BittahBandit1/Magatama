@@ -13,6 +13,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -93,6 +94,13 @@ private:
     void runDiagnostic(const RrvPcsx2GsBridgeUi &ui);
     void followDisplay(const RrvPcsx2GsBridgeUi &ui);
     void reload();
+#if defined(__APPLE__)
+    void followLauncherSettings(const RrvPcsx2GsBridgeUi &ui);
+    bool m_followLauncherSettings = false;
+    std::chrono::steady_clock::time_point m_nextIniCheck;
+    std::filesystem::file_time_type m_iniModified{};
+    settings::IniDocument m_lastIni;
+#endif
     void drawRow(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, int id);
     void change(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, const std::string &value);
     bool applyLive(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, const std::string &value);

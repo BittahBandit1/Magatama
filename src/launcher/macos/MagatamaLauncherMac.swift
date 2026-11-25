@@ -25,6 +25,18 @@ enum Paths {
     }
     static var disc: URL { home.appendingPathComponent("disc") }
     static var runScript: URL { home.appendingPathComponent("runtime/scripts/magatama_run.sh") }
+    static var settingsINI: URL {
+        if let custom = ProcessInfo.processInfo.environment["RRV_FUKAMI_INI"], !custom.isEmpty {
+            let base = bundled ? home : home.appendingPathComponent("runtime", isDirectory: true)
+            return URL(fileURLWithPath: custom, relativeTo: base).absoluteURL
+        }
+        return home.appendingPathComponent("magatama.ini")
+    }
+    static var iosBuildScript: URL { home.appendingPathComponent("runtime/scripts/magatama_build_ios.sh") }
+    static var iosBuildLog: URL { home.appendingPathComponent("runtime/build-ios-launcher.log") }
+    static var iosBuilds: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("magatama/ios-builds")
+    }
     static var importTool: URL {
         Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/magatama-disc-import")
     }
@@ -38,6 +50,10 @@ final class LauncherModel: ObservableObject {
     @Published var message = ""
     @Published var failed = false
     @Published var running = false
+    @Published private(set) var buildingIOS = false
+    @Published private(set) var iosBuildMessage = ""
+    @Published private(set) var iosBuildFailed = false
+    private var iosBuildProcess: Process?
     private var importProcess: Process?
     private var gameProcess: Process?
 
@@ -135,6 +151,10 @@ final class LauncherModel: ObservableObject {
             process.arguments = ["-f", Paths.runScript.path, Paths.disc.path]
             process.currentDirectoryURL = Paths.home.appendingPathComponent("runtime")
         }
+        var environment = process.environment ?? ProcessInfo.processInfo.environment
+        environment["RRV_FUKAMI_INI"] = Paths.settingsINI.path
+        environment["MAGATAMA_LAUNCHER_SETTINGS"] = "1"
+        process.environment = environment
         process.terminationHandler = { finished in
             DispatchQueue.main.async {
                 self.running = false
@@ -151,6 +171,49 @@ final class LauncherModel: ObservableObject {
         } catch {
             failed = true
             message = "Could not start the game: \(error.localizedDescription)"
+        }
+    }
+
+    func buildIOS() {
+        guard !Paths.bundled, !buildingIOS else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-f", Paths.iosBuildScript.path]
+        process.currentDirectoryURL = Paths.home.appendingPathComponent("runtime")
+        var environment = ProcessInfo.processInfo.environment
+        // Finder launches do not normally inherit Homebrew's bin directory.
+        let path = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        environment["PATH"] = path + ":/opt/homebrew/bin:/usr/local/bin"
+        environment["MAGATAMA_IOS_REQUEST_FILE"] = "/dev/null"
+        environment["MAGATAMA_IOS_SIM"] = "0"
+        environment["MAGATAMA_IOS_LEGACY"] = "0"
+        environment.removeValue(forKey: "MAGATAMA_IOS_BUILD_NO")
+        process.environment = environment
+
+        iosBuildFailed = false
+        do {
+            try Data().write(to: Paths.iosBuildLog)
+            let log = try FileHandle(forWritingTo: Paths.iosBuildLog)
+            process.standardOutput = log
+            process.standardError = log
+            process.terminationHandler = { finished in
+                try? log.close()
+                DispatchQueue.main.async {
+                    self.iosBuildProcess = nil
+                    self.buildingIOS = false
+                    self.iosBuildFailed = finished.terminationStatus != 0
+                    self.iosBuildMessage = self.iosBuildFailed
+                        ? "iOS build failed. Open the build log for details."
+                        : "Unsigned iOS build ready."
+                }
+            }
+            try process.run()
+            iosBuildProcess = process
+            buildingIOS = true
+            iosBuildMessage = "Building an unsigned iOS app…"
+        } catch {
+            iosBuildFailed = true
+            iosBuildMessage = "Could not start the iOS build. \(error.localizedDescription)"
         }
     }
 
@@ -180,7 +243,6 @@ final class LauncherModel: ObservableObject {
             "RRV_PCSX2_GS_VSYNC": "1",
             "RRV_GS_EXECUTION": "worker-sync",
             "RRV_VU1GS_EXECUTION": "owner-async",
-            "RRV_FUKAMI_INI": home.appendingPathComponent("magatama.ini").path,
             "MTL_SHADER_DEPTH_WORKAROUND": "0",
             "MAGATAMA_IPU": "1",
             "MAGATAMA_IPU_WORKER_TIMING": "1",
@@ -211,6 +273,7 @@ final class LauncherModel: ObservableObject {
 struct LauncherView: View {
     @ObservedObject var model: LauncherModel
     @State private var picking = false
+    @State private var showingSettings = false
 
     private var imageTypes: [UTType] {
         ["iso", "chd", "zso", "bin", "cue"].compactMap { UTType(filenameExtension: $0) } + [.diskImage]
@@ -262,6 +325,15 @@ struct LauncherView: View {
                     }
                     .controlSize(.large)
                 }
+                if !Paths.bundled && FileManager.default.isReadableFile(atPath: Paths.iosBuildScript.path) {
+                    iosBuildControls
+                }
+                Button {
+                    showingSettings = true
+                } label: {
+                    Label("Recomp Settings…", systemImage: "gearshape")
+                }
+                .keyboardShortcut(",", modifiers: .command)
                 Text("Your own Nocturne (USA) disc image: .iso, .chd or .zso")
                     .font(.footnote)
                     .foregroundColor(.white.opacity(0.45))
@@ -269,9 +341,34 @@ struct LauncherView: View {
             }
             .padding(.horizontal, 24)
         }
-        .frame(width: 560, height: 380)
+        .frame(width: 560, height: Paths.bundled ? 410 : 470)
+        .sheet(isPresented: $showingSettings) {
+            RecompSettingsView(path: Paths.settingsINI.path)
+        }
         .fileImporter(isPresented: $picking, allowedContentTypes: imageTypes) { result in
             if case .success(let url) = result { model.importImage(url) }
+        }
+    }
+
+    private var iosBuildControls: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                if model.buildingIOS {
+                    ProgressView().controlSize(.small)
+                }
+                Button("Build for iOS") { model.buildIOS() }
+                    .disabled(model.buildingIOS)
+                Button("Open iOS Builds") { NSWorkspace.shared.open(Paths.iosBuilds) }
+                    .disabled(!FileManager.default.fileExists(atPath: Paths.iosBuilds.path))
+                Button("Open Build Log") { NSWorkspace.shared.open(Paths.iosBuildLog) }
+                    .disabled(!FileManager.default.fileExists(atPath: Paths.iosBuildLog.path))
+            }
+            if !model.iosBuildMessage.isEmpty {
+                Text(model.iosBuildMessage)
+                    .font(.callout)
+                    .foregroundColor(model.iosBuildFailed ? .red.opacity(0.9) : .white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+            }
         }
     }
 
@@ -285,6 +382,120 @@ struct LauncherView: View {
             Text(model.running ? "Magatama is running" : model.installed ? "Disc ready" : "No disc imported yet")
                 .font(.callout)
                 .foregroundColor(model.installed ? .green.opacity(0.9) : .white.opacity(0.6))
+        }
+    }
+}
+
+struct RecompSettingsView: View {
+    struct Setting: Decodable, Identifiable {
+        let id: String
+        let section: String
+        let label: String
+        let help: String
+        let kind: String
+        let value: String
+        let choices: [String]
+        let minimum: Int
+        let maximum: Int
+        let live: Bool
+    }
+
+    let path: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var settings: [Setting] = []
+    @State private var edits: [String: String] = [:]
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Recomp Settings").font(.title2.bold())
+            Text("Live settings apply during gameplay. Settings marked Next launch take effect when the game starts again.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Form {
+                ForEach(["audio", "display", "rendering", "input", "timing"], id: \.self) { section in
+                    let rows = settings.filter { $0.section == section }
+                    if !rows.isEmpty {
+                        Section(section == "timing" ? "Performance" : section.capitalized) {
+                            ForEach(rows) { setting in
+                                control(setting)
+                                    .help(setting.help)
+                            }
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            if let error {
+                Text(error).foregroundStyle(.red)
+            }
+            HStack {
+                Spacer()
+                Button(edits.isEmpty ? "Close" : "Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Apply") {
+                    if MagatamaWriteSettings(path, edits) {
+                        dismiss()
+                    } else {
+                        error = "Could not save the settings file."
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(edits.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 540, height: 580)
+        .task {
+            if let data = MagatamaReadSettings(path),
+               let rows = try? JSONDecoder().decode([Setting].self, from: data) {
+                settings = rows
+            } else {
+                error = "Could not read the settings file."
+            }
+        }
+    }
+
+    @ViewBuilder private func control(_ setting: Setting) -> some View {
+        let label = setting.live ? setting.label : "\(setting.label) · Next launch"
+        let value = Binding(
+            get: { edits[setting.id] ?? setting.value },
+            set: { edits[setting.id] = $0 == setting.value ? nil : $0 }
+        )
+        switch setting.kind {
+        case "toggle":
+            Toggle(label, isOn: Binding(
+                get: { value.wrappedValue == "true" },
+                set: { value.wrappedValue = $0 ? "true" : "false" }
+            ))
+        case "choice":
+            Picker(label, selection: value) {
+                ForEach(setting.choices, id: \.self) { choice in
+                    Text(choiceLabel(choice, for: setting.id)).tag(choice)
+                }
+            }
+        default:
+            let current = Int(value.wrappedValue) ?? setting.minimum
+            Slider(value: Binding(
+                get: { Double(current) },
+                set: { value.wrappedValue = String(Int($0)) }
+            ), in: Double(setting.minimum)...Double(setting.maximum),
+               step: setting.id == "rendering.resolution_scale" ? 5 : 1) {
+                Text("\(label) (\(current))")
+            }
+        }
+    }
+
+    private func choiceLabel(_ choice: String, for id: String) -> String {
+        switch (id, choice) {
+        case ("rendering.aniso", "0"): return "Off"
+        case ("rendering.aniso", _): return "\(choice)×"
+        case ("rendering.frame_rate", _): return "\(choice) FPS"
+        case ("rendering.render_mode", "full"): return "Full frames"
+        case ("rendering.render_mode", "field"): return "Fields"
+        case (_, "ps2"): return "PS2"
+        case (_, "auto"): return "Automatic"
+        default: return choice.capitalized
         }
     }
 }

@@ -29,6 +29,9 @@
 #include <unistd.h>
 #endif
 #include <vector>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -554,6 +557,31 @@ void testBackKeys(const fs::path &ini)
     expect(menu.takeQuitRequest() && !menu.takeQuitRequest(), "confirmed Quit requests one clean stop");
 }
 
+#if defined(__APPLE__) && TARGET_OS_OSX
+void testLauncherChangesWhileMenuClosed(const fs::path &ini)
+{
+    setenv("MAGATAMA_LAUNCHER_SETTINGS", "1", 1);
+    fukami::menu::Menu menu(ini);
+    unsetenv("MAGATAMA_LAUNCHER_SETTINGS");
+    expect(fukami::settings::updateIni(ini, {
+        {"audio", "volume", "45"},
+        {"display", "fullscreen", "true"},
+        {"rendering", "fxaa", "true"},
+        {"rendering", "frame_rate", "60"},
+    }), "launcher changes saved");
+    frame(menu);
+    expect(!menu.isOpen() && !called("begin "), "the in-game menu stays closed");
+    expect(rrv::audio::outputVolume() == 45 && called("set-fxaa 1"), "launcher changes apply live");
+    expect(menu.takeFullscreenRequest() == 1, "launcher fullscreen is sent to the window thread");
+    expect(!menu.takeRestartRequest(), "launcher settings never request a restart");
+    menu.setAvailable(true);
+    menu.open();
+    frame(menu);
+    expect(called("warning Restart to apply: Frame rate"), "the in-game menu shows pending launcher changes");
+    expect(readFile(ini).find("RRV_CUSTOM = 1") != std::string::npos, "unrelated ini values are preserved");
+}
+#endif
+
 void testFullscreen(const fs::path &ini)
 {
     fukami::menu::Menu menu(ini);
@@ -673,6 +701,11 @@ int main()
     reset();
     testPackageDefaults(ini);
     testFilesAndNoIni();
+#if defined(__APPLE__) && TARGET_OS_OSX
+    reset();
+    testLauncherChangesWhileMenuClosed(ini);
+    fs::remove(ini.string() + ".lock");
+#endif
     fs::remove(ini);
     if (failures)
     {

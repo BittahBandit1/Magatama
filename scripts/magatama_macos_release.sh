@@ -130,8 +130,11 @@ xcrun clang++ -std=c++20 -O2 -mmacosx-version-min=$target -I"$repo/src/app" -I"$
 print "== Magatama.app template (the launcher and the runtime; the installer adds the game)"
 app="$kit/app/Magatama.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources/workload" "$app/Contents/Resources/game"
+xcrun clang++ -std=c++20 -O2 -fobjc-arc -target arm64-apple-macos$target -I"$repo/src/app" \
+    -c "$repo/src/launcher/macos/MagatamaSettingsBridge.mm" -o "$out/settings-bridge.o" || exit 1
 xcrun swiftc -parse-as-library -O -swift-version 5 -target arm64-apple-macos$target \
-    "$repo/src/launcher/macos/MagatamaLauncherMac.swift" -o "$app/Contents/MacOS/Magatama"
+    -import-objc-header "$repo/src/launcher/macos/MagatamaSettingsBridge.h" \
+    "$repo/src/launcher/macos/MagatamaLauncherMac.swift" "$out/settings-bridge.o" "$build/librrv_fukami_settings.a" -lc++ -o "$app/Contents/MacOS/Magatama"
 cp "$kit/tools/magatama-disc-import" "$app/Contents/MacOS/"
 cp "$repo/config/magatama/bound-workload.txt" "$app/Contents/Resources/workload/"
 touch "$app/Contents/Resources/game/.rrv-resource-package.lock"

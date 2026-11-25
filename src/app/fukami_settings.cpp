@@ -4,6 +4,11 @@
 // ini give the runtime the same environment (Gate-9 APP6).
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 #endif
 #include "fukami_settings.h"
 
@@ -103,7 +108,7 @@ std::optional<IniDocument> IniDocument::load(const std::filesystem::path &path)
 {
     std::error_code ec;
     if (!std::filesystem::exists(path, ec))
-        return IniDocument{};
+        return ec ? std::nullopt : std::optional<IniDocument>{IniDocument{}};
     std::ifstream in(path, std::ios::binary);
     if (!in)
         return std::nullopt;
@@ -253,6 +258,37 @@ bool IniDocument::save(const std::filesystem::path &path) const
         return false;
     }
     return true;
+}
+
+bool updateIni(const std::filesystem::path &path, const std::vector<Override> &changes)
+{
+    if (path.empty())
+        return false;
+#if defined(__APPLE__) && TARGET_OS_OSX
+    std::error_code ec;
+    if (path.has_parent_path())
+        std::filesystem::create_directories(path.parent_path(), ec);
+    auto lockPath = path;
+    lockPath += ".lock";
+    struct Lock {
+        int fd;
+        ~Lock() { if (fd >= 0) close(fd); }
+    } lock{open(lockPath.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600)};
+    if (lock.fd < 0 || flock(lock.fd, LOCK_EX) != 0)
+        return false;
+#endif
+    auto doc = IniDocument::load(path);
+    if (!doc)
+        return false;
+    bool dirty = false;
+    for (const auto &[section, key, value] : changes)
+    {
+        if (doc->get(section, key) == value)
+            continue;
+        doc->set(section, key, value);
+        dirty = true;
+    }
+    return !dirty || doc->save(path);
 }
 
 // ---- schema --------------------------------------------------------------

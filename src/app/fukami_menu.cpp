@@ -181,6 +181,16 @@ Menu::Menu(std::filesystem::path ini, const std::filesystem::path &defaults) :
     if (const char* aspect = std::getenv("MAGATAMA_ASPECT"); aspect && *aspect)
         m_launch[id("display", "nocturne_aspect")] = std::string(aspect) == "off" ? "4:3" : aspect;
     m_values = m_launch;
+#if defined(__APPLE__) && TARGET_OS_OSX
+    m_followLauncherSettings = !m_ini.empty() && std::getenv("MAGATAMA_LAUNCHER_SETTINGS");
+    if (m_followLauncherSettings)
+    {
+        if (doc)
+            m_lastIni = *doc;
+        // The first poll also catches a write made during startup.
+        m_iniModified = std::filesystem::file_time_type::min();
+    }
+#endif
     rrv::audio::setOutputVolume(static_cast<int>(toLong(m_values[id("audio", "volume")], 100)));
     rrv::audio::setOutputMuted(settings::boolValue(m_values[id("audio", "mute")]));
     // The picture fit that an empty `aspect` stands for is the ratio this
@@ -223,20 +233,8 @@ void Menu::fullscreenChanged(bool fullscreen, bool persist)
     if (!persist || m_ini.empty())
         return;
     std::lock_guard<std::mutex> lock(m_saveMutex);
-    auto doc = settings::IniDocument::load(m_ini);
-    if (!doc)
-    {
-        m_status = "Could not read the settings file.";
-        return;
-    }
-    const auto current = doc->get("display", "fullscreen");
-    if (current && settings::boolValue(*current) == fullscreen)
-        return;
-    doc->set("display", "fullscreen", fullscreen ? "true" : "false");
-    if (!doc->save(m_ini))
+    if (!settings::updateIni(m_ini, {{"display", "fullscreen", fullscreen ? "true" : "false"}}))
         m_status = "Could not save the settings file.";
-    else
-        std::fprintf(stderr, "[fukami-menu] saved display.fullscreen=%s\n", fullscreen ? "true" : "false");
 }
 
 void Menu::frameCallback(void *menu, const RrvPcsx2GsBridgeUi *ui)
@@ -278,6 +276,46 @@ void Menu::reload()
             (shown.get(spec.section,spec.key) ? settings::value(shown,spec) : m_launch[key]);
     }
 }
+
+#if defined(__APPLE__) && TARGET_OS_OSX
+void Menu::followLauncherSettings(const RrvPcsx2GsBridgeUi &ui)
+{
+    if (!m_followLauncherSettings)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < m_nextIniCheck)
+        return;
+    m_nextIniCheck = now + std::chrono::milliseconds(250);
+    std::error_code ec;
+    const auto modified = std::filesystem::last_write_time(m_ini, ec);
+    if (ec || modified == m_iniModified)
+        return;
+    const auto doc = settings::IniDocument::load(m_ini);
+    if (!doc)
+        return;
+    m_iniModified = modified;
+    for (const auto &spec : settings::schema())
+    {
+        if (!availableInMenu(spec))
+            continue;
+        const auto saved = doc->get(spec.section, spec.key);
+        if (saved == m_lastIni.get(spec.section, spec.key) || !saved || !settings::valid(spec, *saved))
+            continue;
+        const auto key = id(spec.section, spec.key);
+        if (key == "display.fullscreen")
+        {
+            const bool wanted = settings::boolValue(*saved);
+            if (wanted != m_fullscreen.load(std::memory_order_acquire))
+                m_fullscreenRequest.store(wanted ? 1 : 0);
+        }
+        else if (!appliesLive(spec.section, spec.key))
+            m_values[key] = *saved;
+        else if (m_launch[key] != *saved && applyLive(ui, spec, *saved))
+            m_values[key] = m_launch[key] = *saved;
+    }
+    m_lastIni = *doc;
+}
+#endif
 
 // Bounded Terminal-agent check: call the production setting handler without
 // fabricating OS input, opening a menu, changing guest scripts or saving a card.
@@ -343,6 +381,9 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
             }
         }
     }
+#if defined(__APPLE__) && TARGET_OS_OSX
+    followLauncherSettings(ui);
+#endif
     runDiagnostic(ui);
     followDisplay(ui);
     std::deque<Input> inputs;
@@ -738,14 +779,7 @@ bool Menu::save(std::string_view section, std::string_view key, const std::strin
     std::lock_guard<std::mutex> lock(m_saveMutex);
     if (m_ini.empty())
         return false;
-    auto doc = settings::IniDocument::load(m_ini);
-    if (!doc)
-    {
-        m_status = "Could not read the settings file.";
-        return false;
-    }
-    doc->set(section, key, value);
-    if (!doc->save(m_ini))
+    if (!settings::updateIni(m_ini, {{std::string(section), std::string(key), value}}))
     {
         m_status = "Could not save the settings file.";
         return false;
